@@ -1,0 +1,10 @@
+- https://www.svgviewer.dev/
+- https://icon-icons.com/
+- https://anyconv.com/png-to-icns-converter/
+- https://www.flaticon.com/
+- https://www.svgrepo.com/
+- https://freesvgicons.com/search?q=http
+- https://flowbite.com/icons/
+- https://gitee.com/api/v5/swagger
+- https://www.remove.bg/zh 去除图片背景
+- https://www.photopea.com 调整大小

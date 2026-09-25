@@ -1,0 +1,93 @@
+package com.laker.postman.service.variable;
+
+import com.laker.postman.model.Environment;
+import com.laker.postman.service.EnvironmentService;
+import com.laker.postman.variable.VariableType;
+import lombok.extern.slf4j.Slf4j;
+
+import java.util.Collections;
+import java.util.Map;
+
+/**
+ * 环境变量提供者
+ * <p>
+ * 负责从当前激活的环境中获取环境变量
+ * <ul>
+ *   <li>优先级中等（位于执行变量、迭代数据、分组变量之后）</li>
+ *   <li>高于全局变量与内置函数</li>
+ * </ul>
+ */
+@Slf4j
+public class EnvironmentVariableService implements VariableProvider {
+
+    /**
+     * 单例实例
+     */
+    private static final EnvironmentVariableService INSTANCE = new EnvironmentVariableService();
+
+    /**
+     * 私有构造函数，防止外部实例化
+     */
+    private EnvironmentVariableService() {
+    }
+
+    /**
+     * 获取单例实例
+     */
+    public static EnvironmentVariableService getInstance() {
+        return INSTANCE;
+    }
+
+    @Override
+    public String get(String key) {
+        if (key == null || key.isEmpty()) {
+            return null;
+        }
+
+        Environment activeEnv = activeEnvironment();
+        if (activeEnv == null) {
+            return null;
+        }
+
+        return activeEnv.getVariable(key);
+    }
+
+    @Override
+    public boolean has(String key) {
+        if (key == null || key.isEmpty()) {
+            return false;
+        }
+
+        Environment activeEnv = activeEnvironment();
+        if (activeEnv == null) {
+            return false;
+        }
+
+        return activeEnv.getVariable(key) != null;
+    }
+
+    @Override
+    public Map<String, String> getAll() {
+        Environment activeEnv = activeEnvironment();
+        if (activeEnv == null || activeEnv.getVariables() == null) {
+            return Collections.emptyMap();
+        }
+
+        return Collections.unmodifiableMap(activeEnv.getVariables());
+    }
+
+    @Override
+    public int getPriority() {
+        return VariableType.ENVIRONMENT.getPriority();
+    }
+
+    @Override
+    public VariableType getType() {
+        return VariableType.ENVIRONMENT;
+    }
+
+    private Environment activeEnvironment() {
+        Environment scopedEnvironment = RunScopedVariableContext.currentEnvironment();
+        return scopedEnvironment == null ? EnvironmentService.getActiveEnvironment() : scopedEnvironment;
+    }
+}

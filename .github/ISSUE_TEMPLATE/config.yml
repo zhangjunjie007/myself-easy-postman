@@ -1,0 +1,12 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 社区讨论区 | Community Discussions
+    url: https://github.com/lakernote/easy-postman/discussions
+    about: 使用问答、功能建议讨论、分享经验 | Q&A, feature discussions, and sharing experiences
+  - name: 📖 中文文档 | Chinese Documentation
+    url: https://github.com/lakernote/easy-postman/blob/master/README_zh.md
+    about: 查看中文文档 | View Chinese documentation
+  - name: 📖 English Documentation
+    url: https://github.com/lakernote/easy-postman/blob/master/README.md
+    about: View English documentation
+

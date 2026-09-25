@@ -1,0 +1,60 @@
+package com.laker.postman.performance.core.model;
+
+/**
+ * 请求结果记录
+ */
+public class RequestResult {
+    public long startTime;    // 开始时间（毫秒）
+    public long endTime;      // 结束时间（毫秒）
+    public boolean success;   // 是否成功
+    public String apiId;      // API唯一ID（用于统计和查询）
+    public String apiName;    // API显示名（运行内携带，避免依赖全局元数据）
+    public PerformanceProtocol protocol = PerformanceProtocol.HTTP;
+    public int sentMessages;
+    public int receivedMessages;
+    public int matchedMessages;
+    public long sentBytes;      // 发送字节数：请求头 + 请求体，用于计算 Sent KB/s
+    public long receivedBytes;  // 接收字节数：响应头 + 响应体，用于计算 Received KB/s
+    public long firstMessageLatencyMs = -1;
+
+    /**
+     * 主构造函数
+     */
+    public RequestResult(long startTime, long endTime, boolean success, String apiId) {
+        this(startTime, endTime, success, apiId, PerformanceProtocol.HTTP);
+    }
+
+    public RequestResult(long startTime, long endTime, boolean success, String apiId, PerformanceProtocol protocol) {
+        this(startTime, endTime, success, apiId, null, protocol);
+    }
+
+    public RequestResult(long startTime,
+                         long endTime,
+                         boolean success,
+                         String apiId,
+                         String apiName,
+                         PerformanceProtocol protocol) {
+        this.startTime = startTime;
+        this.endTime = endTime;
+        this.success = success;
+        this.apiId = apiId;
+        this.apiName = apiName;
+        this.protocol = protocol == null ? PerformanceProtocol.HTTP : protocol;
+    }
+
+    /**
+     * 获取响应时间（动态计算，不存储）
+     *
+     * @return 响应时间（毫秒）
+     */
+    public long getResponseTime() {
+        return endTime - startTime;
+    }
+
+    public String getApiName() {
+        if (apiName != null && !apiName.isBlank()) {
+            return apiName;
+        }
+        return apiId;
+    }
+}

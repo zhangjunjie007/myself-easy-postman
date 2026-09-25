@@ -1,0 +1,155 @@
+package com.laker.postman.service.js;
+
+import org.testng.annotations.Test;
+
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
+import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNotNull;
+import static org.testng.Assert.assertTrue;
+
+public class JsContextPoolTest {
+
+    @Test(description = "retiring a pool still releases borrowers already waiting for a context", timeOut = 3000)
+    public void testRetiredPoolReleasesWaitingBorrowers() throws Exception {
+        JsContextPool pool = new JsContextPool(1);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        JsContextPool.PooledContext firstBorrow = null;
+        JsContextPool.PooledContext secondBorrow = null;
+        try {
+            firstBorrow = pool.borrowContext(1000);
+            Future<JsContextPool.PooledContext> waitingBorrow = executor.submit(() -> pool.borrowContext(1000));
+
+            long deadline = System.currentTimeMillis() + 1000;
+            while (pool.getWaitingBorrowCountForTests() == 0 && System.currentTimeMillis() < deadline) {
+                Thread.sleep(10);
+            }
+            assertTrue(pool.getWaitingBorrowCountForTests() > 0, "second borrower should be waiting for the exhausted pool");
+
+            pool.retire();
+            pool.returnContext(firstBorrow);
+            firstBorrow = null;
+
+            secondBorrow = waitingBorrow.get(500, TimeUnit.MILLISECONDS);
+            assertNotNull(secondBorrow.getContext());
+        } finally {
+            if (secondBorrow != null) {
+                pool.returnContext(secondBorrow);
+            }
+            if (firstBorrow != null) {
+                pool.returnContext(firstBorrow);
+            }
+            pool.shutdown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test(description = "returned contexts should not retain globals from previous scripts")
+    public void shouldCleanupInjectedBindingsBeforeContextReuse() throws Exception {
+        JsContextPool pool = new JsContextPool(1);
+        JsContextPool.PooledContext borrowed = null;
+        try {
+            borrowed = pool.borrowContext(1000);
+            var context = borrowed.getContext();
+            context.eval("js", """
+                    globalThis.pm = {};
+                    globalThis.customScriptGlobal = {};
+                    """);
+            pool.returnContext(borrowed);
+            borrowed = null;
+
+            borrowed = pool.borrowContext(1000);
+            String retainedGlobals = borrowed.getContext().eval("js", """
+                    ['pm', 'customScriptGlobal']
+                        .filter(name => typeof globalThis[name] !== 'undefined')
+                        .join(',')
+                    """).asString();
+
+            assertEquals(retainedGlobals, "");
+        } finally {
+            if (borrowed != null) {
+                pool.returnContext(borrowed);
+            }
+            pool.shutdown();
+        }
+    }
+
+    @Test(description = "returned contexts should not retain user-created global variables")
+    public void shouldCleanupUserGlobalVariablesBeforeContextReuse() throws Exception {
+        JsContextPool pool = new JsContextPool(1);
+        JsContextPool.PooledContext borrowed = null;
+        try {
+            borrowed = pool.borrowContext(1000);
+            borrowed.getContext().eval("js", "globalThis.__performanceRunLeak = 'leaked';");
+            pool.returnContext(borrowed);
+            borrowed = null;
+
+            borrowed = pool.borrowContext(1000);
+            boolean retained = borrowed.getContext()
+                    .eval("js", "typeof globalThis.__performanceRunLeak !== 'undefined'")
+                    .asBoolean();
+
+            assertEquals(retained, false);
+        } finally {
+            if (borrowed != null) {
+                pool.returnContext(borrowed);
+            }
+            pool.shutdown();
+        }
+    }
+
+    @Test(description = "creating a pooled context should not eagerly load large built-in libraries")
+    public void shouldLoadBuiltinLibrariesLazily() throws Exception {
+        JsLibraryLoader.clearCache();
+        JsContextPool pool = new JsContextPool(1);
+        JsContextPool.PooledContext borrowed = null;
+        try {
+            borrowed = pool.borrowContext(1000);
+            var context = borrowed.getContext();
+
+            assertEquals(JsLibraryLoader.isBuiltinLibraryCachedForTests("lodash"), false);
+            assertTrue(context.eval("js", "typeof pm === 'undefined' && typeof btoa === 'function'").asBoolean());
+            assertEquals(JsLibraryLoader.isBuiltinLibraryCachedForTests("lodash"), false);
+
+            String result = context.eval("js", "JSON.stringify(_.uniq([1, 1, 2]))").asString();
+
+            assertEquals(result, "[1,2]");
+            assertTrue(JsLibraryLoader.isBuiltinLibraryCachedForTests("lodash"));
+        } finally {
+            if (borrowed != null) {
+                pool.returnContext(borrowed);
+            }
+            pool.shutdown();
+        }
+    }
+
+    @Test(description = "context cleanup should retain built-in require cache but clear request-local modules")
+    public void shouldRetainBuiltinRequireCacheAcrossContextReuse() throws Exception {
+        JsContextPool pool = new JsContextPool(1);
+        JsContextPool.PooledContext borrowed = null;
+        try {
+            borrowed = pool.borrowContext(1000);
+            borrowed.getContext().eval("js", """
+                    require('lodash');
+                    globalThis.__epRequireCache['/tmp/request-local.js'] = {};
+                    """);
+            pool.returnContext(borrowed);
+            borrowed = null;
+
+            borrowed = pool.borrowContext(1000);
+            String retainedModules = borrowed.getContext().eval("js", """
+                    Object.keys(globalThis.__epRequireCache || {}).sort().join(',')
+                    """).asString();
+
+            assertEquals(retainedModules, "builtin:lodash");
+        } finally {
+            if (borrowed != null) {
+                pool.returnContext(borrowed);
+            }
+            pool.shutdown();
+        }
+    }
+}

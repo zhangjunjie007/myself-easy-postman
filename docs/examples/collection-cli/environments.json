@@ -1,0 +1,14 @@
+[
+    {
+        "id": "collection-cli-example-environment",
+        "name": "CLI Example",
+        "variableList": [
+            {
+                "enabled": true,
+                "key": "baseUrl",
+                "value": "https://httpbingo.org"
+            }
+        ],
+        "active": true
+    }
+]

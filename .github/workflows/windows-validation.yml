@@ -1,0 +1,185 @@
+name: Windows Validation
+
+on:
+  workflow_dispatch: { }
+  pull_request:
+    branches:
+      - main
+      - master
+      - develop
+      - 'feature/**'
+    paths:
+      - '.github/workflows/windows-validation.yml'
+      - '.github/workflows/pr-check.yml'
+      - '.github/workflows/release.yml'
+      - 'build/**'
+      - 'assets/win/**'
+      - 'easy-postman-plugins/plugin-capture/**'
+
+permissions:
+  contents: read
+
+env:
+  JAVA_VERSION: '17'
+  JAVA_DISTRIBUTION: 'jetbrains'
+  JLINK_MODULES_WINDOWS: 'java.base,java.desktop,java.logging,jdk.unsupported,java.naming,java.net.http,jdk.httpserver,java.prefs,java.sql,java.security.sasl,java.security.jgss,jdk.crypto.ec,jdk.crypto.mscapi,java.management,java.management.rmi,jdk.crypto.cryptoki'
+
+jobs:
+  capture-windows-smoke:
+    name: Capture Windows Smoke
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: 'maven'
+          check-latest: false
+
+      - name: Run capture Windows unit tests
+        shell: powershell
+        run: |
+          mvn -B -q -pl easy-postman-plugins/plugin-capture -am `
+            "-Dtest=WindowsCertificateInstallServiceTest,SystemProxyServiceTest" `
+            "-Dsurefire.failIfNoSpecifiedTests=false" `
+            "-Djava.awt.headless=true" test
+
+      - name: Create Windows runtime with MSCAPI
+        shell: powershell
+        run: |
+          $runtimeDir = "target\runtime"
+          if (Test-Path $runtimeDir) {
+            Remove-Item -Recurse -Force $runtimeDir
+          }
+
+          jlink `
+            --add-modules $env:JLINK_MODULES_WINDOWS `
+            --strip-debug `
+            --no-header-files `
+            --no-man-pages `
+            --compress=2 `
+            --output $runtimeDir
+
+          $modules = & ".\$runtimeDir\bin\java.exe" --list-modules
+          if (-not ($modules -match '^jdk\.crypto\.mscapi(@|$)')) {
+            throw "Windows runtime does not include jdk.crypto.mscapi"
+          }
+
+      - name: Compile Windows root store verifier
+        shell: powershell
+        run: |
+          $smokeDir = "target\windows-smoke"
+          New-Item -ItemType Directory -Force -Path $smokeDir | Out-Null
+
+          @'
+          import java.security.KeyStore;
+          import java.security.MessageDigest;
+          import java.security.cert.Certificate;
+          import java.security.cert.X509Certificate;
+          import java.util.Enumeration;
+          import java.util.HexFormat;
+
+          public class VerifyWindowsRoot {
+              public static void main(String[] args) throws Exception {
+                  KeyStore store = KeyStore.getInstance("Windows-ROOT");
+                  store.load(null, null);
+                  if (args.length == 0) {
+                      System.out.println("Windows-ROOT OK, aliases=" + store.size());
+                      return;
+                  }
+
+                  String expectedThumbprint = args[0].replaceAll("[^0-9A-Fa-f]", "").toUpperCase();
+                  Enumeration<String> aliases = store.aliases();
+                  while (aliases.hasMoreElements()) {
+                      Certificate certificate = store.getCertificate(aliases.nextElement());
+                      if (certificate instanceof X509Certificate x509) {
+                          String actualThumbprint = HexFormat.of().withUpperCase().formatHex(
+                                  MessageDigest.getInstance("SHA-1").digest(x509.getEncoded()));
+                          if (actualThumbprint.equals(expectedThumbprint)) {
+                              System.out.println("Windows-ROOT contains " + expectedThumbprint);
+                              return;
+                          }
+                      }
+                  }
+                  throw new IllegalStateException("Windows-ROOT does not contain " + expectedThumbprint);
+              }
+          }
+          '@ | Set-Content -Encoding Ascii "$smokeDir\VerifyWindowsRoot.java"
+
+          javac -d $smokeDir "$smokeDir\VerifyWindowsRoot.java"
+
+      - name: Verify Windows-ROOT from packaged runtime
+        shell: powershell
+        run: |
+          .\target\runtime\bin\java.exe -cp target\windows-smoke VerifyWindowsRoot
+
+      - name: Verify CurrentUser certificate import tooling
+        shell: powershell
+        timeout-minutes: 2
+        run: |
+          $keyStorePath = Join-Path $env:RUNNER_TEMP "easy-postman-ci-root.p12"
+          $certPath = Join-Path $env:RUNNER_TEMP "easy-postman-ci-root.cer"
+          $storePassword = "changeit"
+          $alias = "easy-postman-ci-root"
+
+          Write-Host "Generating temporary test certificate with keytool..."
+          keytool -genkeypair `
+            -alias $alias `
+            -keyalg RSA `
+            -keysize 2048 `
+            -dname "CN=EasyPostman CI Root" `
+            -validity 1 `
+            -storetype PKCS12 `
+            -keystore $keyStorePath `
+            -storepass $storePassword `
+            -keypass $storePassword `
+            -noprompt
+
+          keytool -exportcert `
+            -alias $alias `
+            -keystore $keyStorePath `
+            -storepass $storePassword `
+            -file $certPath
+
+          try {
+            $thumbprint = (Get-PfxCertificate -FilePath $certPath).Thumbprint
+            Write-Host "Importing temporary certificate into CurrentUser My store with certutil: $thumbprint"
+            certutil -user -f -addstore My $certPath
+            if ($LASTEXITCODE -ne 0) {
+              throw "certutil addstore My failed with exit code $LASTEXITCODE"
+            }
+
+            Write-Host "Verifying CurrentUser My store contains temporary certificate..."
+            certutil -user -store My $thumbprint
+            if ($LASTEXITCODE -ne 0) {
+              throw "certutil store My did not find $thumbprint"
+            }
+          } finally {
+            if ($thumbprint) {
+              certutil -user -delstore My $thumbprint
+            }
+            Remove-Item $keyStorePath -Force -ErrorAction SilentlyContinue
+            Remove-Item $certPath -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Verify WinINet refresh API
+        shell: powershell
+        run: |
+          Add-Type -Namespace EasyPostman -Name WinInetSmoke -MemberDefinition @'
+          [System.Runtime.InteropServices.DllImport("wininet.dll", SetLastError=true)]
+          public static extern bool InternetSetOption(System.IntPtr hInternet, int option, System.IntPtr buffer, int bufferLength);
+          '@
+
+          $options = @(39, 95, 37)
+          foreach ($option in $options) {
+            $ok = [EasyPostman.WinInetSmoke]::InternetSetOption([System.IntPtr]::Zero, $option, [System.IntPtr]::Zero, 0)
+            if (-not $ok) {
+              $errorCode = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+              throw "InternetSetOption($option) failed with Win32 error $errorCode"
+            }
+          }

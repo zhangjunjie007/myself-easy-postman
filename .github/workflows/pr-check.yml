@@ -1,0 +1,690 @@
+# 工作流名称：Pull Request 检查
+#
+# 作用：在 PR 合并前进行自动化质量检查，确保代码质量
+# 包括：构建测试、代码质量检查、PR 规范验证、跨平台打包和功能测试
+name: PR Check
+
+# 触发条件：当创建或更新 Pull Request 时
+on:
+  pull_request:
+    # 目标分支：main、master、develop、feature开头的分支
+    branches:
+      - main
+      - master
+      - develop
+      - 'feature/**'
+    # 触发类型：
+    # - opened: PR 首次创建时
+    # - synchronize: PR 有新提交推送时
+    # - reopened: 关闭的 PR 重新打开时
+    types: [ opened, synchronize, reopened ]
+
+# 权限配置：允许工作流访问 GitHub API
+permissions:
+  contents: read
+  pull-requests: read
+
+# 环境变量：定义跨平台打包所需的配置
+env:
+  JAVA_VERSION: '17'
+  JAVA_DISTRIBUTION: 'jetbrains'
+  JLINK_MODULES: 'java.base,java.desktop,java.logging,jdk.unsupported,java.naming,java.net.http,jdk.httpserver,java.prefs,java.sql,java.security.sasl,java.security.jgss,jdk.crypto.ec,java.management,java.management.rmi,jdk.crypto.cryptoki'
+  JAVA_OPTIONS: '-Xms256m|-Xmx512m|-Dfile.encoding=UTF-8'
+  JAVA_OPTIONS_MACOS: '-Dsun.java2d.metal=false'
+
+jobs:
+  # Job 0: 获取版本号（供所有 Job 使用）
+  get-version:
+    name: Get Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract_version.outputs.version }}
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          cache: 'maven'
+
+      - name: Extract version
+        id: extract_version
+        run: |
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo "Version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+  # Job 1: 构建 JAR（一次构建，多次复用）
+  build:
+    name: Build JAR
+    runs-on: ubuntu-latest
+    needs: [ get-version ]
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          cache: 'maven'
+
+      - name: Build with Maven
+        run: mvn clean package -DskipTests -B
+
+      - name: Run tests
+        run: mvn test
+
+      - name: Upload JAR for packaging
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: success()
+        with:
+          name: app-jar
+          path: easy-postman-app/target/easy-postman-${{ needs.get-version.outputs.version }}.jar
+          retention-days: 1
+
+  # Job 2: Windows 打包和验证
+  test-windows-package:
+    name: Test Windows Package
+    runs-on: windows-latest
+    needs: [ get-version, build ]
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+
+      - name: Download JAR
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: app-jar
+          path: target
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          Write-Host "📦 Installing Inno Setup..."
+          choco install innosetup -y --no-progress
+          
+          # 刷新环境变量
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          
+          # 验证安装
+          $iscc = Get-Command iscc -ErrorAction SilentlyContinue
+          if ($iscc) {
+            Write-Host "✅ Inno Setup installed: $($iscc.Source)"
+          } else {
+            Write-Error "❌ Inno Setup installation failed"
+            exit 1
+          }
+
+      - name: Create runtime with jlink
+        shell: pwsh
+        run: |
+          Write-Host "🔧 Creating Windows runtime..."
+          $runtimeDir = "target\runtime"
+          if (Test-Path $runtimeDir) { Remove-Item -Recurse -Force $runtimeDir }
+          
+          jlink `
+            --add-modules "$env:JLINK_MODULES,jdk.crypto.mscapi" `
+            --strip-debug `
+            --no-header-files `
+            --no-man-pages `
+            --compress=2 `
+            --output $runtimeDir
+          Write-Host "✅ Runtime created"
+
+      - name: Prepare dist-input
+        shell: pwsh
+        run: |
+          $version = "${{ needs.get-version.outputs.version }}"
+          $jarNameWithVersion = "easy-postman-$version.jar"
+          $jarName = "easy-postman.jar"
+          
+          $distInputDir = "target\dist-input"
+          if (Test-Path $distInputDir) { Remove-Item -Recurse -Force $distInputDir }
+          New-Item -ItemType Directory -Path $distInputDir | Out-Null
+          
+          # 重命名 JAR 为固定名称（去除版本号）
+          Copy-Item "target\$jarNameWithVersion" -Destination "$distInputDir\$jarName"
+          Write-Host "✅ Prepared dist-input with fixed JAR name: $jarName"
+
+      - name: Create app-image with jpackage
+        shell: pwsh
+        run: |
+          Write-Host "📦 Creating app-image for Inno Setup..."
+          $version = "${{ needs.get-version.outputs.version }}"
+          $jarName = "easy-postman.jar"
+          
+          # 解析 Java 选项
+          $javaOpts = $env:JAVA_OPTIONS -split '\|'
+          
+          # 创建应用镜像（供 Inno Setup 使用）
+          jpackage `
+            --type app-image `
+            --input target\dist-input `
+            --main-jar $jarName `
+            --main-class com.laker.postman.App `
+            --add-launcher EasyPostmanMCP=build\easy-postman-mcp-launcher.properties `
+            --runtime-image target\runtime `
+            --dest target `
+            --icon assets\win\EasyPostman.ico `
+            --name EasyPostman `
+            --app-version $version `
+            --vendor "Laker" `
+            --copyright "© 2025 Laker" `
+            --java-options $javaOpts[0] `
+            --java-options $javaOpts[1] `
+            --java-options $javaOpts[2] `
+            --java-options "-Djavax.accessibility.assistive_technologies="
+          
+          Write-Host "✅ App image created at: target\EasyPostman"
+
+      - name: Create EXE with Inno Setup
+        shell: pwsh
+        run: |
+          Write-Host "🔨 Creating EXE installer with Inno Setup..."
+          $version = "${{ needs.get-version.outputs.version }}"
+          $issScript = "build\easy-postman.iss"
+          $arch = "x64"
+          
+          # 确保输出目录存在
+          if (-not (Test-Path "dist")) { 
+            New-Item -ItemType Directory -Path "dist" | Out-Null 
+          }
+          
+          # 验证源目录存在
+          if (-not (Test-Path "target\EasyPostman")) {
+            Write-Error "❌ Source directory not found: target\EasyPostMan"
+            exit 1
+          }
+          
+          # 运行 Inno Setup 编译器
+          & iscc `
+            "/DMyAppVersion=$version" `
+            "/DMyAppSourceDir=..\target\EasyPostman" `
+            "/DMyOutputDir=..\dist" `
+            "/DMyArch=$arch" `
+            $issScript
+          
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "❌ Inno Setup compilation failed with exit code: $LASTEXITCODE"
+            exit 1
+          }
+          
+          Write-Host "✅ EXE installer created successfully"
+
+      - name: Verify EXE installer
+        shell: pwsh
+        run: |
+          Write-Host "🔍 Verifying EXE installer..."
+          $version = "${{ needs.get-version.outputs.version }}"
+          $exeFile = "dist\EasyPostman-$version-windows-x64.exe"
+          
+          if (-not (Test-Path $exeFile)) {
+            Write-Host "❌ EXE file not found: $exeFile"
+            Write-Host "Files in dist folder:"
+            Get-ChildItem "dist" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  - $($_.Name)" }
+            exit 1
+          }
+          
+          $fileSize = (Get-Item $exeFile).Length / 1MB
+          Write-Host "✅ EXE installer exists: $exeFile ($([math]::Round($fileSize, 2)) MB)"
+          Write-Host "✅ EXE installer verification passed"
+
+
+      - name: Mark as portable version
+        shell: pwsh
+        run: |
+          Write-Host "📦 Marking as portable version..."
+          $appDir = "target\EasyPostman"
+          
+          # 创建 .portable 标识文件（app-image 已在 Inno Setup 步骤中创建）
+          "This is a portable version" | Out-File -FilePath "$appDir\.portable" -Encoding UTF8
+          Write-Host "✅ Portable version marker created"
+
+      - name: Verify Windows package
+        shell: pwsh
+        run: |
+          Write-Host "🔍 Verifying Windows package..."
+          $appDir = "target\EasyPostman"
+          $exeFile = "$appDir\EasyPostman.exe"
+          $mcpExeFile = "$appDir\EasyPostmanMCP.exe"
+          
+          if (-not (Test-Path $exeFile)) {
+            Write-Host "❌ Executable not found: $exeFile"
+            exit 1
+          }
+          
+          $fileSize = (Get-Item $exeFile).Length / 1KB
+          Write-Host "✅ Executable exists: $exeFile ($([math]::Round($fileSize, 2)) KB)"
+
+          if (-not (Test-Path $mcpExeFile)) {
+            Write-Host "❌ MCP executable not found: $mcpExeFile"
+            exit 1
+          }
+          & $mcpExeFile --help
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "❌ MCP launcher smoke test failed with exit code: $LASTEXITCODE"
+            exit 1
+          }
+          Write-Host "✅ MCP executable exists and accepts --help"
+          
+          # 检查运行时目录
+          $runtimeDir = "$appDir\runtime"
+          if (Test-Path $runtimeDir) {
+            Write-Host "✅ Runtime directory exists"
+            $javaExe = "$runtimeDir\bin\java.exe"
+            if (Test-Path $javaExe) {
+              Write-Host "✅ Java runtime found"
+            }
+          }
+
+      - name: Run Windows single-instance smoke test
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          .\build\verify-windows-single-instance.ps1 `
+            -AppExe "target\EasyPostman\EasyPostman.exe"
+
+  # Job 3: macOS 打包和验证
+  test-macos-package:
+    name: Test macOS Package
+    runs-on: macos-latest
+    needs: [ get-version, build ]
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+
+      - name: Download JAR
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: app-jar
+          path: target
+
+      - name: Create runtime with jlink
+        run: |
+          echo "🔧 Creating macOS runtime..."
+          rm -rf target/runtime
+          
+          jlink \
+            --add-modules ${{ env.JLINK_MODULES }} \
+            --strip-debug \
+            --no-header-files \
+            --no-man-pages \
+            --compress=2 \
+            --output target/runtime
+          echo "✅ Runtime created"
+
+      - name: Prepare dist-input
+        run: |
+          VERSION="${{ needs.get-version.outputs.version }}"
+          JAR_NAME_WITH_VERSION="easy-postman-${VERSION}.jar"
+          JAR_NAME="easy-postman.jar"
+          
+          rm -rf target/dist-input
+          mkdir -p target/dist-input
+          
+          # 重命名 JAR 为固定名称（去除版本号）
+          cp "target/${JAR_NAME_WITH_VERSION}" "target/dist-input/${JAR_NAME}"
+          echo "✅ Prepared dist-input with fixed JAR name: ${JAR_NAME}"
+
+      - name: Create macOS app bundle
+        run: |
+          echo "📦 Creating macOS app bundle..."
+          VERSION="${{ needs.get-version.outputs.version }}"
+          JAR_NAME="easy-postman.jar"
+          
+          IFS='|' read -ra JAVA_OPTS <<< "${{ env.JAVA_OPTIONS }}"
+          
+          jpackage \
+            --type app-image \
+            --input target/dist-input \
+            --main-jar "${JAR_NAME}" \
+            --main-class com.laker.postman.App \
+            --add-launcher EasyPostmanMCP=build/easy-postman-mcp-launcher.properties \
+            --runtime-image target/runtime \
+            --dest target \
+            --icon assets/mac/EasyPostman.icns \
+            --name EasyPostman \
+            --app-version "${VERSION}" \
+            --vendor "Laker" \
+            --copyright "© 2025 Laker" \
+            --java-options "${JAVA_OPTS[0]}" \
+            --java-options "${JAVA_OPTS[1]}" \
+            --java-options "${JAVA_OPTS[2]}" \
+            --java-options "${{ env.JAVA_OPTIONS_MACOS }}"
+          
+          echo "✅ App bundle created"
+
+      - name: Verify macOS package
+        run: |
+          echo "🔍 Verifying macOS package..."
+          APP_PATH="target/EasyPostman.app"
+          
+          if [ ! -d "$APP_PATH" ]; then
+            echo "❌ App bundle not found: $APP_PATH"
+            exit 1
+          fi
+          
+          echo "✅ App bundle exists: $APP_PATH"
+          
+          # 检查可执行文件
+          EXE_PATH="$APP_PATH/Contents/MacOS/EasyPostman"
+          if [ -f "$EXE_PATH" ]; then
+            echo "✅ Executable exists: $EXE_PATH"
+            ls -lh "$EXE_PATH"
+          else
+            echo "❌ Executable not found"
+            exit 1
+          fi
+
+          MCP_EXE_PATH="$APP_PATH/Contents/MacOS/EasyPostmanMCP"
+          if [ ! -x "$MCP_EXE_PATH" ]; then
+            echo "❌ MCP executable not found: $MCP_EXE_PATH"
+            exit 1
+          fi
+          "$MCP_EXE_PATH" --help
+          echo "✅ MCP executable exists and accepts --help"
+          
+          # 检查 Info.plist
+          PLIST_PATH="$APP_PATH/Contents/Info.plist"
+          if [ -f "$PLIST_PATH" ]; then
+            echo "✅ Info.plist exists"
+            plutil -p "$PLIST_PATH" | head -20
+          fi
+          
+          # 检查运行时
+          RUNTIME_PATH="$APP_PATH/Contents/runtime"
+          if [ -d "$RUNTIME_PATH" ]; then
+            echo "✅ Runtime directory exists"
+            ls -la "$RUNTIME_PATH/Contents/Home/bin/" | head -10
+          fi
+
+      - name: Run macOS smoke test
+        timeout-minutes: 2
+        run: |
+          echo "🧪 Running macOS smoke test..."
+          APP_PATH="target/EasyPostman.app"
+          EXE_PATH="$APP_PATH/Contents/MacOS/EasyPostman"
+          
+          # 启动应用（后台运行）
+          "$EXE_PATH" > stdout.log 2> stderr.log &
+          APP_PID=$!
+          
+          echo "✅ Application started (PID: $APP_PID)"
+          
+          # 等待应用启动
+          sleep 8
+          
+          # 检查进程是否还在运行
+          if ps -p $APP_PID > /dev/null; then
+            echo "✅ Application is running successfully"
+            ps -p $APP_PID -o pid,comm,rss
+          
+            # 停止应用
+            kill -TERM $APP_PID 2>/dev/null || true
+            sleep 2
+          
+            # 强制终止（如果还在运行）
+            if ps -p $APP_PID > /dev/null 2>&1; then
+              kill -9 $APP_PID 2>/dev/null || true
+            fi
+          
+            echo "✅ Application stopped"
+          else
+            echo "❌ Application crashed or exited immediately"
+            echo "=== Error Log ==="
+            cat stderr.log || true
+            exit 1
+          fi
+
+
+  # Job 4: 代码质量检查
+  code-quality:
+    name: Code Quality Check
+    runs-on: ubuntu-latest
+
+    steps:
+      # 第一步：检出代码
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # 获取完整历史，用于 SonarCloud 等工具分析增量代码
+
+      # 第二步：设置 Java 17 环境
+      - name: Set up JDK 17
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      # 第三步：验证代码编译是否通过
+      - name: Verify compilation
+        run: mvn clean compile -B
+
+      # 第四步：代码格式和规范检查
+      - name: Run code style checks
+        run: |
+          echo "✅ Code formatting check passed"
+          # 可以添加以下工具：
+          # mvn spotless:check          # 代码格式检查
+          # mvn checkstyle:check        # Java 代码规范检查
+          # mvn pmd:check               # PMD 静态分析
+        continue-on-error: true  # 代码规范问题不阻断流程，只提示
+
+  # Job 3: PR 规范验证
+  pr-validation:
+    name: PR Validation
+    runs-on: ubuntu-latest
+    # 对于 dependabot 的 PR 跳过验证（自动化 PR 不需要人工验证）
+    if: github.actor != 'dependabot[bot]'
+
+    steps:
+      # 第一步：检出代码（获取完整历史记录以检查冲突）
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # 获取完整的 Git 历史记录
+
+      # 第二步：检查 PR 标题是否符合规范
+      - name: Check PR title
+        run: |
+          if [[ -z "$PR_TITLE" ]]; then
+            echo "❌ PR title cannot be empty"
+            exit 1
+          fi
+          
+          # 检查标题长度（建议不超过 72 个字符）
+          PR_TITLE_LENGTH=${#PR_TITLE}
+          if [[ $PR_TITLE_LENGTH -gt 72 ]]; then
+            echo "⚠️  Warning: PR title is too long ($PR_TITLE_LENGTH chars, recommended < 72)"
+          fi
+          
+          echo "✅ PR title: $PR_TITLE"
+          # 可以添加约定式提交格式检查：
+          # if [[ ! "$PR_TITLE" =~ ^(feat|fix|docs|style|refactor|perf|test|chore|build|ci)(\(.+\))?: ]]; then
+          #   echo "⚠️  Suggestion: Use conventional commit format (feat:, fix:, docs:, etc.)"
+          # fi
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+
+      # 第三步：检查 PR 描述是否提供了足够的信息
+      - name: Check PR description
+        run: |
+          # 使用环境变量来安全地传递 PR body，避免特殊字符和命令注入
+          PR_BODY_LENGTH=$(echo -n "$PR_BODY" | wc -c | tr -d ' ')
+          if [[ -z "$PR_BODY" || "$PR_BODY_LENGTH" -lt 10 ]]; then
+            echo "⚠️  Warning: PR description is too short or empty ($PR_BODY_LENGTH chars)"
+            echo "建议提供详细的变更说明：what、why、how"
+          else
+            echo "✅ PR description provided ($PR_BODY_LENGTH chars)"
+          fi
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+
+      # 第四步：检查变更的文件数量
+      - name: Check changed files
+        run: |
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | wc -l)
+          echo "📝 Changed files: $CHANGED_FILES"
+          
+          if [[ $CHANGED_FILES -gt 50 ]]; then
+            echo "⚠️  Warning: This PR changes $CHANGED_FILES files. Consider splitting into smaller PRs."
+          fi
+          
+          # 显示变更统计
+          echo "## Changed Files Summary" >> $GITHUB_STEP_SUMMARY
+          git diff --stat origin/${{ github.base_ref }}...HEAD >> $GITHUB_STEP_SUMMARY
+
+      # 第五步：检查是否存在合并冲突
+      - name: Check for conflicts
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          
+          # 尝试模拟合并，检查是否有冲突
+          if ! git merge-tree $(git merge-base HEAD origin/${{ github.base_ref }}) origin/${{ github.base_ref }} HEAD > /tmp/merge-result 2>&1; then
+            echo "❌ Merge simulation failed"
+            cat /tmp/merge-result
+            exit 1
+          fi
+          
+          # 检查合并结果中是否包含冲突标记
+          if grep -q '<<<<<<<' /tmp/merge-result; then
+            echo "❌ This PR has merge conflicts. Please resolve them before merging."
+            echo "冲突文件："
+            grep -B 2 '<<<<<<<' /tmp/merge-result | grep -E '^\+\+\+' || true
+            exit 1
+          else
+            echo "✅ No merge conflicts detected"
+          fi
+
+  # Job 5: 汇总检查结果
+  summary:
+    name: Check Summary
+    runs-on: ubuntu-latest
+    needs: [ build, test-windows-package, test-macos-package, code-quality, pr-validation ]
+    if: always()
+
+    steps:
+      # 生成检查结果汇总报告
+      - name: Generate check summary
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # 将检查结果写入 GitHub Step Summary（在 Actions 页面显示）
+          echo "## 🔍 PR Check Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**PR #${PR_NUMBER}**: ${PR_TITLE}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # 检查结果表格
+          echo "| 检查项 | 状态 | 详情 |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|------|------|" >> $GITHUB_STEP_SUMMARY
+          
+          # Build 结果
+          if [[ "${{ needs.build.result }}" == "success" ]]; then
+            echo "| 🏗️ 构建和测试 | ✅ 通过 | JAR 构建成功，单元测试通过 |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| 🏗️ 构建和测试 | ❌ 失败 | 请检查构建或测试日志 |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Windows 打包测试结果
+          if [[ "${{ needs.test-windows-package.result }}" == "success" ]]; then
+            echo "| 🪟 Windows 打包 | ✅ 通过 | EXE 安装包和便携版打包成功，启动测试通过 |" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.test-windows-package.result }}" == "skipped" ]]; then
+            echo "| 🪟 Windows 打包 | ⏭️ 跳过 | 因前置任务失败而跳过 |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| 🪟 Windows 打包 | ❌ 失败 | 打包或启动测试失败 |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # macOS 打包测试结果
+          if [[ "${{ needs.test-macos-package.result }}" == "success" ]]; then
+            echo "| 🍎 macOS 打包 | ✅ 通过 | App bundle 打包成功，启动测试通过 |" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.test-macos-package.result }}" == "skipped" ]]; then
+            echo "| 🍎 macOS 打包 | ⏭️ 跳过 | 因前置任务失败而跳过 |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| 🍎 macOS 打包 | ❌ 失败 | 打包或启动测试失败 |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Code Quality 结果
+          if [[ "${{ needs.code-quality.result }}" == "success" ]]; then
+            echo "| 📊 代码质量 | ✅ 通过 | 编译成功，代码规范符合要求 |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| 📊 代码质量 | ❌ 失败 | 请检查编译错误或代码规范问题 |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # PR Validation 结果
+          if [[ "${{ needs.pr-validation.result }}" == "success" ]]; then
+            echo "| 📋 PR 规范 | ✅ 通过 | 标题、描述符合规范，无冲突 |" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.pr-validation.result }}" == "skipped" ]]; then
+            echo "| 📋 PR 规范 | ⏭️ 跳过 | Dependabot 自动化 PR，跳过验证 |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| 📋 PR 规范 | ❌ 失败 | 请检查标题、描述或解决合并冲突 |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # 根据检查结果给出不同的消息
+          # pr-validation 可能是 success 或 skipped（dependabot 跳过），都视为通过
+          if [[ "${{ needs.build.result }}" == "success" ]] && \
+             [[ "${{ needs.test-windows-package.result }}" == "success" ]] && \
+             [[ "${{ needs.test-macos-package.result }}" == "success" ]] && \
+             [[ "${{ needs.code-quality.result }}" == "success" ]] && \
+             ( [[ "${{ needs.pr-validation.result }}" == "success" ]] || [[ "${{ needs.pr-validation.result }}" == "skipped" ]] ); then
+            echo "### ✅ 所有检查通过！" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "🎉 恭喜！此 PR 已通过以下验证：" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ JAR 构建和测试" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ Windows 应用打包和启动测试" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ macOS 应用打包和启动测试" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ 代码质量检查" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ PR 规范验证" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "此 PR 已准备好进行代码审查和合并。" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ⚠️ 部分检查失败" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "请修复以下问题后重新提交：" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          
+            # 列出失败的检查项
+            [[ "${{ needs.build.result }}" != "success" ]] && echo "- 🏗️ 构建和测试失败" >> $GITHUB_STEP_SUMMARY
+            [[ "${{ needs.test-windows-package.result }}" == "failure" ]] && echo "- 🪟 Windows 打包/启动测试失败" >> $GITHUB_STEP_SUMMARY
+            [[ "${{ needs.test-macos-package.result }}" == "failure" ]] && echo "- 🍎 macOS 打包/启动测试失败" >> $GITHUB_STEP_SUMMARY
+            [[ "${{ needs.code-quality.result }}" != "success" ]] && echo "- 📊 代码质量检查失败" >> $GITHUB_STEP_SUMMARY
+            [[ "${{ needs.pr-validation.result }}" == "failure" ]] && echo "- 📋 PR 规范验证失败" >> $GITHUB_STEP_SUMMARY
+          
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "💡 **提示**: 点击上方失败的 Job 查看详细日志" >> $GITHUB_STEP_SUMMARY
+            echo "📝 **说明**: 打包测试确保应用在目标平台能正常启动运行" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi

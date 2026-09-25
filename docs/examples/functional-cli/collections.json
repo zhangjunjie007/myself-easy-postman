@@ -1,0 +1,28 @@
+[
+    {
+        "type": "group",
+        "id": "functional-cli-example",
+        "name": "EasyPostman Functional CLI Example",
+        "description": "Standard EasyPostman workspace example for functional run.",
+        "children": [
+            {
+                "type": "group",
+                "id": "functional-smoke",
+                "name": "Smoke",
+                "children": [
+                    {
+                        "type": "request",
+                        "data": {
+                            "id": "functional-get-example",
+                            "name": "GET functional example",
+                            "url": "{{baseUrl}}/get?user={{user}}",
+                            "method": "GET",
+                            "bodyType": "none",
+                            "postscript": "var response = pm.response.json();\npm.test('status is 200', function () { pm.response.to.have.status(200); });\npm.test('iteration data reached the server', function () { pm.expect(response.args.user[0]).to.equal(pm.iterationData.get('user')); });"
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+]

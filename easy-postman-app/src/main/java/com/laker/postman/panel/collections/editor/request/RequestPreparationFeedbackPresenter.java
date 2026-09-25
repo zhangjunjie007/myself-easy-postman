@@ -1,0 +1,106 @@
+package com.laker.postman.panel.collections.editor.request;
+
+import cn.hutool.core.text.CharSequenceUtil;
+import com.formdev.flatlaf.FlatClientProperties;
+import com.laker.postman.http.execution.RequestPreparationResult;
+import com.laker.postman.panel.collections.editor.request.sub.RequestLinePanel;
+import com.laker.postman.panel.collections.editor.request.sub.ResponsePanel;
+import com.laker.postman.panel.sidebar.ConsolePanel;
+import com.laker.postman.http.request.HttpRequestValidationResult;
+import com.laker.postman.util.I18nUtil;
+import com.laker.postman.util.MessageKeys;
+import com.laker.postman.common.component.notification.NotificationCenter;
+
+import javax.swing.*;
+import java.awt.event.ActionListener;
+
+final class RequestPreparationFeedbackPresenter {
+
+    void clearUrlValidationFeedback(JTextField urlField) {
+        urlField.putClientProperty(FlatClientProperties.OUTLINE, null);
+    }
+
+    boolean handlePreparationFailure(RequestPreparationResult result,
+                                     JTextField urlField,
+                                     RequestLinePanel requestLinePanel,
+                                     ActionListener sendAction,
+                                     ResponsePanel responsePanel) {
+        if (result == null) {
+            resetUiAfterPreparationFailure(requestLinePanel, sendAction, responsePanel);
+            NotificationCenter.showError(I18nUtil.getMessage(MessageKeys.GENERAL_ERROR_MESSAGE));
+            return true;
+        }
+        if (result.hasValidationFailure()) {
+            resetUiAfterPreparationFailure(requestLinePanel, sendAction, responsePanel);
+            showValidationFailure(urlField, result.getValidationResult());
+            return true;
+        }
+        if (result.hasError()) {
+            resetUiAfterPreparationFailure(requestLinePanel, sendAction, responsePanel);
+            NotificationCenter.showError(result.getErrorMessage());
+            return true;
+        }
+        return false;
+    }
+
+    void showPreparationWarningIfNeeded(RequestPreparationResult result) {
+        if (!result.hasWarning()) {
+            return;
+        }
+        NotificationCenter.showWarning(result.getValidationResult().getMessage());
+        ConsolePanel.appendLog("[Warning] " + result.getValidationResult().getMessage(), ConsolePanel.LogType.WARN);
+    }
+
+    boolean confirmContinuationIfNeeded(RequestPreparationResult result,
+                                        RequestLinePanel requestLinePanel,
+                                        ActionListener sendAction,
+                                        ResponsePanel responsePanel) {
+        if (result == null || !result.requiresConfirmation()) {
+            return true;
+        }
+        int confirm = JOptionPane.showConfirmDialog(
+                responsePanel,
+                result.getValidationResult().getMessage(),
+                result.getValidationResult().getConfirmationTitle(),
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE
+        );
+        if (confirm == JOptionPane.YES_OPTION) {
+            return true;
+        }
+        resetUiAfterPreparationFailure(requestLinePanel, sendAction, responsePanel);
+        return false;
+    }
+
+    private void resetUiAfterPreparationFailure(RequestLinePanel requestLinePanel,
+                                                ActionListener sendAction,
+                                                ResponsePanel responsePanel) {
+        requestLinePanel.setSendButtonToSend(sendAction);
+        responsePanel.hideLoadingOverlay();
+    }
+
+    private void showValidationFailure(JTextField urlField, HttpRequestValidationResult validationResult) {
+        String message = validationResult.getMessage();
+        if (CharSequenceUtil.isNotBlank(message)) {
+            if (validationResult.isWarning()) {
+                NotificationCenter.showWarning(message);
+                ConsolePanel.appendLog("[Warning] " + message, ConsolePanel.LogType.WARN);
+            } else {
+                NotificationCenter.showError(message);
+                ConsolePanel.appendLog("[Error] " + message, ConsolePanel.LogType.ERROR);
+            }
+        }
+        if (validationResult.shouldFocusUrlField()) {
+            showUrlValidationFeedback(urlField, validationResult.isWarning());
+        }
+    }
+
+    private void showUrlValidationFeedback(JTextField urlField, boolean warning) {
+        urlField.putClientProperty(FlatClientProperties.OUTLINE,
+                warning ? "warning" : FlatClientProperties.OUTLINE_ERROR);
+        SwingUtilities.invokeLater(() -> {
+            urlField.requestFocusInWindow();
+            urlField.selectAll();
+        });
+    }
+}

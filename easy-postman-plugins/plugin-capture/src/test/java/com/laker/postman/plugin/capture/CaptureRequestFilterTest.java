@@ -1,0 +1,313 @@
+package com.laker.postman.plugin.capture;
+
+import org.testng.annotations.Test;
+
+import java.util.Map;
+
+import static org.testng.Assert.assertFalse;
+import static org.testng.Assert.assertTrue;
+
+public class CaptureRequestFilterTest {
+
+    @Test
+    public void shouldKeepHostSuffixFilterBehavior() {
+        CaptureRequestFilter filter = CaptureRequestFilter.parse("api.example.com");
+
+        assertTrue(filter.matches("api.example.com", "/orders", "https://api.example.com/orders", Map.of()));
+        assertTrue(filter.matches("v1.api.example.com", "/orders", "https://v1.api.example.com/orders", Map.of()));
+        assertFalse(filter.matches("static.example.com", "/orders", "https://static.example.com/orders", Map.of()));
+    }
+
+    @Test
+    public void shouldRequireAllSpecifiedDimensions() {
+        CaptureRequestFilter filter = CaptureRequestFilter.parse("host:api.example.com query:debug=true path:/orders");
+
+        assertTrue(filter.matches(
+                "api.example.com",
+                "/v1/orders?debug=true&sort=desc",
+                "https://api.example.com/v1/orders?debug=true&sort=desc",
+                Map.of()));
+        assertFalse(filter.matches(
+                "api.example.com",
+                "/v1/orders?debug=false",
+                "https://api.example.com/v1/orders?debug=false",
+                Map.of()));
+        assertFalse(filter.matches(
+                "api.example.com",
+                "/v1/users?debug=true",
+                "https://api.example.com/v1/users?debug=true",
+                Map.of()));
+    }
+
+    @Test
+    public void shouldSupportMethodRules() {
+        CaptureRequestFilter filter = CaptureRequestFilter.parse("method:POST host:api.example.com path:/orders");
+
+        assertTrue(filter.matches(
+                "POST",
+                "api.example.com",
+                "/v1/orders?debug=true",
+                "https://api.example.com/v1/orders?debug=true",
+                Map.of()));
+        assertFalse(filter.matches(
+                "GET",
+                "api.example.com",
+                "/v1/orders?debug=true",
+                "https://api.example.com/v1/orders?debug=true",
+                Map.of()));
+    }
+
+    @Test
+    public void shouldSupportExcludeRules() {
+        CaptureRequestFilter filter = CaptureRequestFilter.parse("host:example.com !query:token=secret");
+
+        assertTrue(filter.matches(
+                "example.com",
+                "/api/users?token=public",
+                "https://example.com/api/users?token=public",
+                Map.of()));
+        assertFalse(filter.matches(
+                "example.com",
+                "/api/users?token=secret",
+                "https://example.com/api/users?token=secret",
+                Map.of()));
+    }
+
+    @Test
+    public void shouldSupportWildcardAndRegexRules() {
+        CaptureRequestFilter wildcardFilter = CaptureRequestFilter.parse("path:*/orders/*");
+        CaptureRequestFilter regexFilter = CaptureRequestFilter.parse("regex:https://api\\.example\\.com/.+[?&](token|session)=");
+
+        assertTrue(wildcardFilter.matches(
+                "api.example.com",
+                "/v1/orders/123?debug=true",
+                "https://api.example.com/v1/orders/123?debug=true",
+                Map.of()));
+        assertFalse(wildcardFilter.matches(
+                "api.example.com",
+                "/v1/users/123",
+                "https://api.example.com/v1/users/123",
+                Map.of()));
+
+        assertTrue(regexFilter.matches(
+                "api.example.com",
+                "/v1/orders?token=abc",
+                "https://api.example.com/v1/orders?token=abc",
+                Map.of()));
+        assertFalse(regexFilter.matches(
+                "api.example.com",
+                "/v1/orders?trace=abc",
+                "https://api.example.com/v1/orders?trace=abc",
+                Map.of()));
+    }
+
+    @Test
+    public void shouldSupportSchemeAndResourceTypeAliases() {
+        CaptureRequestFilter httpsFilter = CaptureRequestFilter.parse("https");
+        CaptureRequestFilter imageFilter = CaptureRequestFilter.parse("image");
+        CaptureRequestFilter jsonFilter = CaptureRequestFilter.parse("json");
+        CaptureRequestFilter apiFilter = CaptureRequestFilter.parse("type:api");
+        CaptureRequestFilter websocketFilter = CaptureRequestFilter.parse("websocket");
+        CaptureRequestFilter wsFilter = CaptureRequestFilter.parse("ws");
+        CaptureRequestFilter sseFilter = CaptureRequestFilter.parse("sse");
+
+        assertTrue(httpsFilter.matches("chatgpt.com", "/assets/app.js", "https://chatgpt.com/assets/app.js", Map.of()));
+        assertFalse(httpsFilter.matches("example.com", "/app.js", "http://example.com/app.js", Map.of()));
+
+        assertTrue(imageFilter.matches(
+                "static.example.com",
+                "/logo.png",
+                "https://static.example.com/logo.png",
+                Map.of("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")));
+        assertFalse(imageFilter.matches(
+                "api.example.com",
+                "/v1/users",
+                "https://api.example.com/v1/users",
+                Map.of("Accept", "application/json")));
+
+        assertTrue(jsonFilter.matches(
+                "api.example.com",
+                "/v1/users",
+                "https://api.example.com/v1/users",
+                Map.of("Accept", "application/json")));
+        assertTrue(apiFilter.matches(
+                "api.example.com",
+                "/api/users/list",
+                "https://api.example.com/api/users/list",
+                Map.of()));
+        assertFalse(apiFilter.matches(
+                "www.example.com",
+                "/index.html",
+                "https://www.example.com/index.html",
+                Map.of("Accept", "text/html")));
+        assertTrue(websocketFilter.matches(
+                "GET",
+                "echo.example.com",
+                "/socket",
+                "https://echo.example.com/socket",
+                Map.of("Upgrade", "websocket")));
+        assertTrue(wsFilter.matches(
+                "GET",
+                "echo.example.com",
+                "/socket",
+                "https://echo.example.com/socket",
+                Map.of("Upgrade", "websocket")));
+        assertTrue(sseFilter.matches(
+                "GET",
+                "events.example.com",
+                "/events",
+                "https://events.example.com/events",
+                Map.of("Accept", "text/event-stream")));
+    }
+
+    @Test
+    public void shouldSupportSourceRules() {
+        CaptureSourceInfo sourceInfo = CaptureSourceInfo.network("127.0.0.1", 53421, "127.0.0.1", 8888)
+                .withProcess("25562", "Google Chrome Helper", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome Helper");
+        CaptureRequestFilter filter = CaptureRequestFilter.parse(
+                "source:127.0.0.1:53421 client:127.0.0.1 sourcePort:53421 pid:25562 process:\"Google Chrome Helper\" sourcePath:Chrome.app");
+
+        assertTrue(filter.matches(
+                "GET",
+                "api.example.com",
+                "/orders",
+                "https://api.example.com/orders",
+                Map.of(),
+                sourceInfo));
+        assertFalse(filter.matches(
+                "GET",
+                "api.example.com",
+                "/orders",
+                "https://api.example.com/orders",
+                Map.of(),
+                sourceInfo.withProcess("111", "codex", "/usr/local/bin/codex")));
+    }
+
+    @Test
+    public void shouldSupportSourceRulesWhenDecidingMitm() {
+        CaptureSourceInfo chrome = CaptureSourceInfo.network("127.0.0.1", 53421, "127.0.0.1", 8888)
+                .withProcess("111", "Google Chrome Helper", "/Applications/Google Chrome.app");
+        CaptureSourceInfo codex = CaptureSourceInfo.network("127.0.0.1", 53422, "127.0.0.1", 8888)
+                .withProcess("222", "codex", "/usr/local/bin/codex");
+        CaptureRequestFilter filter = CaptureRequestFilter.parse("host:api.example.com !process:Chrome source:127.0.0.1");
+
+        assertFalse(filter.shouldMitmHost("api.example.com", chrome));
+        assertTrue(filter.shouldMitmHost("api.example.com", codex));
+        assertFalse(filter.shouldMitmHost("static.example.com", codex));
+    }
+
+    @Test
+    public void shouldUseSourceTermsInsideExpressionForMitmDecision() {
+        CaptureSourceInfo chrome = CaptureSourceInfo.network("127.0.0.1", 53421, "127.0.0.1", 8888)
+                .withProcess("111", "Google Chrome Helper", "/Applications/Google Chrome.app");
+        CaptureSourceInfo codex = CaptureSourceInfo.network("127.0.0.1", 53422, "127.0.0.1", 8888)
+                .withProcess("222", "codex", "/usr/local/bin/codex");
+        CaptureRequestFilter filter = CaptureRequestFilter.parse("(host:api.example.com and process:codex) or host:public.example.com");
+
+        assertFalse(filter.shouldMitmHost("api.example.com", chrome));
+        assertTrue(filter.shouldMitmHost("api.example.com", codex));
+        assertTrue(filter.shouldMitmHost("public.example.com", chrome));
+        assertFalse(filter.shouldMitmHost("static.example.com", codex));
+    }
+
+    @Test
+    public void shouldMitmAllHostsWhenOnlyQueryRulesExist() {
+        CaptureRequestFilter filter = CaptureRequestFilter.parse("query:debug=true");
+
+        assertTrue(filter.shouldMitmHost("api.example.com"));
+        assertTrue(filter.shouldMitmHost("static.example.com"));
+    }
+
+    @Test
+    public void shouldRespectHostRulesWhenDecidingMitm() {
+        CaptureRequestFilter filter = CaptureRequestFilter.parse("host:api.example.com !host:static.example.com query:debug=true");
+
+        assertTrue(filter.shouldMitmHost("api.example.com"));
+        assertFalse(filter.shouldMitmHost("static.example.com"));
+        assertFalse(filter.shouldMitmHost("other.example.com"));
+    }
+
+    @Test
+    public void shouldSupportPartialHostSegmentMatching() {
+        CaptureRequestFilter filter = CaptureRequestFilter.parse("echo.websocket");
+
+        assertTrue(filter.matches(
+                "echo.websocket.org",
+                "/",
+                "https://echo.websocket.org/",
+                Map.of()));
+        assertTrue(filter.shouldMitmHost("echo.websocket.org"));
+    }
+
+    @Test
+    public void shouldSupportOrAndParenthesesExpressions() {
+        CaptureRequestFilter filter = CaptureRequestFilter.parse("(a.com or b.com) json");
+
+        assertTrue(filter.matches(
+                "a.com",
+                "/orders",
+                "https://a.com/orders",
+                Map.of("Accept", "application/json")));
+        assertTrue(filter.matches(
+                "api.b.com",
+                "/orders",
+                "https://api.b.com/orders",
+                Map.of("Content-Type", "application/json")));
+        assertFalse(filter.matches(
+                "c.com",
+                "/orders",
+                "https://c.com/orders",
+                Map.of("Accept", "application/json")));
+        assertFalse(filter.matches(
+                "a.com",
+                "/orders",
+                "https://a.com/orders",
+                Map.of("Accept", "text/html")));
+    }
+
+    @Test
+    public void shouldRespectOperatorPrecedenceInExpressions() {
+        CaptureRequestFilter filter = CaptureRequestFilter.parse("a.com or b.com json");
+
+        assertTrue(filter.matches(
+                "a.com",
+                "/orders",
+                "https://a.com/orders",
+                Map.of("Accept", "text/html")));
+        assertTrue(filter.matches(
+                "b.com",
+                "/orders",
+                "https://b.com/orders",
+                Map.of("Accept", "application/json")));
+        assertFalse(filter.matches(
+                "b.com",
+                "/orders",
+                "https://b.com/orders",
+                Map.of("Accept", "text/html")));
+    }
+
+    @Test
+    public void shouldUseHostTermsInsideExpressionForMitmDecision() {
+        CaptureRequestFilter filter = CaptureRequestFilter.parse("(a.com or b.com) json");
+
+        assertTrue(filter.shouldMitmHost("a.com"));
+        assertTrue(filter.shouldMitmHost("x.b.com"));
+        assertFalse(filter.shouldMitmHost("c.com"));
+    }
+
+    @Test
+    public void shouldSupportNegationInsideExpressions() {
+        CaptureRequestFilter filter = CaptureRequestFilter.parse("(a.com or b.com) !image");
+
+        assertTrue(filter.matches(
+                "a.com",
+                "/orders",
+                "https://a.com/orders",
+                Map.of("Accept", "application/json")));
+        assertFalse(filter.matches(
+                "a.com",
+                "/logo.png",
+                "https://a.com/logo.png",
+                Map.of("Accept", "image/png")));
+    }
+}

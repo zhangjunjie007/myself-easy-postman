@@ -1,0 +1,1526 @@
+name: Release Build（发布构建）
+
+permissions:
+  contents: write
+
+on:
+  release:
+    types: [ created ]  # 当创建新的 Release 时触发
+  workflow_dispatch: { }  # 支持手动触发
+
+env:
+  JAVA_VERSION: '17'
+  JAVA_DISTRIBUTION: 'jetbrains'  # 使用 JetBrains Runtime（JBR），为 Swing 应用优化
+  JLINK_MODULES: 'java.base,java.desktop,java.logging,jdk.unsupported,java.naming,java.net.http,jdk.httpserver,java.prefs,java.sql,java.security.sasl,java.security.jgss,jdk.crypto.ec,java.management,java.management.rmi,jdk.crypto.cryptoki'
+  # 通用 Java 选项（所有平台共享）
+  JAVA_OPTIONS_COMMON: '-Xms256m|-Xmx1g|-XX:MaxMetaspaceSize=256m|-XX:MetaspaceSize=128m|-XX:MaxDirectMemorySize=256m|-XX:+UseG1GC|-XX:MaxGCPauseMillis=200|-XX:InitiatingHeapOccupancyPercent=45|-XX:+UseStringDeduplication|-XX:+HeapDumpOnOutOfMemoryError|-XX:HeapDumpPath=./dumps|-Dfile.encoding=UTF-8|-Dswing.aatext=true|-Dhttp.keepAlive=true'
+  # Windows 特定选项
+  JAVA_OPTIONS_WINDOWS: '-Djavax.accessibility.assistive_technologies='
+  # macOS 特定选项
+  JAVA_OPTIONS_MACOS: '-Dsun.java2d.metal=false|-Dapple.awt.application.appearance=system|--add-opens java.desktop/java.awt=ALL-UNNAMED|--add-opens java.desktop/sun.lwawt=ALL-UNNAMED|--add-opens java.desktop/sun.lwawt.macosx=ALL-UNNAMED|--add-exports java.desktop/com.apple.eawt=ALL-UNNAMED'
+  # Linux 特定选项
+  JAVA_OPTIONS_LINUX: '-Dawt.useSystemAAFontSettings=on|--add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED'
+
+jobs:
+  # 提取版本号，供所有 job 复用
+  get-version:
+    name: Get Version（获取版本号）
+    runs-on: ubuntu-latest
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name || '', 'v')
+    outputs:
+      version: ${{ steps.extract_version.outputs.version }}
+    steps:
+      - name: Checkout（检出代码）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
+
+      - name: Setup Java（配置 Java）
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: 'maven'
+          check-latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version（提取版本号）
+        id: extract_version
+        run: |
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo "Version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Validate release source and version（校验默认分支与版本一致性）
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
+          CURRENT_REF="${{ github.ref_name }}"
+          VERSION="${{ steps.extract_version.outputs.version }}"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "$CURRENT_REF" != "$DEFAULT_BRANCH" ]; then
+            echo "workflow_dispatch is only allowed from the default branch: ${DEFAULT_BRANCH}" >&2
+            exit 1
+          fi
+
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG_NAME="${{ github.event.release.tag_name }}"
+            TARGET_COMMITISH="${{ github.event.release.target_commitish }}"
+            EXPECTED_TAG="v${VERSION}"
+
+            if [ "$TARGET_COMMITISH" != "$DEFAULT_BRANCH" ]; then
+              echo "Release must target default branch ${DEFAULT_BRANCH}, got ${TARGET_COMMITISH}" >&2
+              exit 1
+            fi
+
+            if [ "$TAG_NAME" != "$EXPECTED_TAG" ]; then
+              echo "Release tag ${TAG_NAME} does not match pom version ${VERSION}" >&2
+              exit 1
+            fi
+          fi
+
+  # 构建 Fat JAR（跨平台），供所有平台复用
+  build-jar-artifact:
+    name: Build Fat JAR（构建跨平台 JAR）
+    runs-on: ubuntu-latest
+    needs: [ get-version ]
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name || '', 'v')
+    steps:
+      - name: Checkout（检出代码）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Java（配置 Java）
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: 'maven'
+          check-latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build with Maven（使用 Maven 构建 Fat JAR）
+        run: mvn -B clean package -DskipTests
+
+      - name: Upload JAR for reuse（上传 JAR 供其他 job 复用）
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: app-jar
+          path: easy-postman-app/target/easy-postman-${{ needs.get-version.outputs.version }}.jar
+          retention-days: 1
+
+
+  build-windows-portable:
+    name: Build Windows Portable（构建 Windows 绿色版）
+    runs-on: windows-latest
+    needs: [ get-version, build-jar-artifact ]
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name || '', 'v')
+
+    steps:
+      - name: Checkout（检出代码）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Java（配置 Java）
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          check-latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download Fat JAR（下载跨平台 Fat JAR）
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: app-jar
+          path: target
+
+      - name: Create runtime with jlink（使用 jlink 创建 Windows 精简 JRE）
+        shell: pwsh
+        run: |
+          $runtimeDir = "target\runtime"
+          if (Test-Path $runtimeDir) { Remove-Item -Recurse -Force $runtimeDir }
+          
+          jlink `
+            --add-modules "$env:JLINK_MODULES,jdk.crypto.mscapi" `
+            --strip-java-debug-attributes `
+            --strip-native-commands `
+            --strip-debug `
+            --no-header-files `
+            --no-man-pages `
+            --compress=2 `
+            --verbose `
+            --output $runtimeDir
+          
+          # 验证 JRE 大小
+          $size = (Get-ChildItem -Path $runtimeDir -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
+          Write-Host "✅ JRE 创建成功，大小: $([math]::Round($size, 2)) MB"
+
+      - name: Prepare dist-input（准备打包输入目录）
+        shell: pwsh
+        run: |
+          $version = "${{ needs.get-version.outputs.version }}"
+          $jarNameWithVersion = "easy-postman-$version.jar"
+          $jarName = "easy-postman.jar"
+          
+          $distInputDir = "target\dist-input"
+          if (Test-Path $distInputDir) { Remove-Item -Recurse -Force $distInputDir }
+          New-Item -ItemType Directory -Path $distInputDir | Out-Null
+          Copy-Item "target\$jarNameWithVersion" -Destination "$distInputDir\$jarName"
+
+      - name: Create app-image with jpackage（创建应用镜像，免安装）
+        shell: pwsh
+        run: |
+          $version = "${{ needs.get-version.outputs.version }}"
+          $jarName = "easy-postman.jar"
+          $appImageDir = "target\app-image"
+          
+          if (Test-Path $appImageDir) { Remove-Item -Recurse -Force $appImageDir }
+          
+          # 解析通用 Java 选项
+          $javaOptsCommon = $env:JAVA_OPTIONS_COMMON -split '\|'
+          # 解析 Windows 特定选项
+          $javaOptsWindows = $env:JAVA_OPTIONS_WINDOWS -split '\|'
+          
+          # 构建 jpackage 参数列表
+          $jpackageArgs = @(
+            '--type', 'app-image',
+            '--input', 'target\dist-input',
+            '--main-jar', $jarName,
+            '--main-class', 'com.laker.postman.App',
+            '--add-launcher', 'EasyPostmanMCP=build\easy-postman-mcp-launcher.properties',
+            '--runtime-image', 'target\runtime',
+            '--dest', 'target',
+            '--icon', 'assets\win\EasyPostman.ico',
+            '--name', 'EasyPostman',
+            '--app-version', $version,
+            '--vendor', 'Laker',
+            '--copyright', '© 2025 Laker'
+          )
+          
+          # 添加通用 Java 选项
+          foreach ($opt in $javaOptsCommon) {
+            $jpackageArgs += '--java-options'
+            $jpackageArgs += $opt
+          }
+          
+          # 添加 Windows 特定选项
+          foreach ($opt in $javaOptsWindows) {
+            if ($opt -ne '') {
+              $jpackageArgs += '--java-options'
+              $jpackageArgs += $opt
+            }
+          }
+          
+          # 执行 jpackage
+          & jpackage @jpackageArgs
+
+          if (-not (Test-Path "target\EasyPostman\EasyPostmanMCP.exe")) {
+            throw "MCP launcher was not created"
+          }
+
+      - name: Package portable version（打包绿色版为 ZIP）
+        shell: pwsh
+        run: |
+          $version = "${{ needs.get-version.outputs.version }}"
+          $appImageDir = "target\EasyPostman"
+          $zipName = "EasyPostman-$version-windows-x64-portable.zip"
+          
+          if (-not (Test-Path "dist")) { New-Item -ItemType Directory -Path "dist" | Out-Null }
+          
+          # 创建 .portable 标识文件，用于运行时检测便携版
+          $portableMarker = Join-Path $appImageDir ".portable"
+          "This is a portable version" | Out-File -FilePath $portableMarker -Encoding UTF8
+          Write-Host "Created .portable marker file"
+          
+          # 压缩为 ZIP
+          Compress-Archive -Path $appImageDir -DestinationPath "dist\$zipName" -Force
+          
+          Write-Host "✅ Created portable version: $zipName"
+
+      - name: Upload as Artifact（上传为构建产物）
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: EasyPostman-Windows-Portable
+          path: dist/*-portable.zip
+          retention-days: 7
+
+
+  build-windows-exe:
+    name: Build Windows EXE Installer（构建 Windows EXE 安装程序）
+    runs-on: windows-latest
+    needs: [ get-version, build-jar-artifact ]
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name || '', 'v')
+
+    steps:
+      - name: Checkout（检出代码）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Java（配置 Java）
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          check-latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download Fat JAR（下载跨平台 Fat JAR）
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: app-jar
+          path: target
+
+      - name: Install Inno Setup（安装 Inno Setup）
+        shell: pwsh
+        run: |
+          Write-Host "📦 Installing Inno Setup..."
+          choco install innosetup -y --no-progress
+          
+          # 刷新环境变量
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          
+          # 验证安装
+          $iscc = Get-Command iscc -ErrorAction SilentlyContinue
+          if ($iscc) {
+            Write-Host "✅ Inno Setup installed: $($iscc.Source)"
+            # 显示版本信息（iscc 不带参数会显示版本和帮助）
+            & iscc 2>&1 | Select-Object -First 5
+          } else {
+            Write-Error "❌ Inno Setup installation failed"
+            exit 1
+          }
+
+      - name: Create runtime with jlink（使用 jlink 创建 Windows 精简 JRE）
+        shell: pwsh
+        run: |
+          $runtimeDir = "target\runtime"
+          if (Test-Path $runtimeDir) { Remove-Item -Recurse -Force $runtimeDir }
+          
+          jlink `
+            --add-modules "$env:JLINK_MODULES,jdk.crypto.mscapi" `
+            --strip-java-debug-attributes `
+            --strip-native-commands `
+            --strip-debug `
+            --no-header-files `
+            --no-man-pages `
+            --compress=2 `
+            --verbose `
+            --output $runtimeDir
+          
+          # 验证 JRE 大小
+          $size = (Get-ChildItem -Path $runtimeDir -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
+          Write-Host "✅ JRE 创建成功，大小: $([math]::Round($size, 2)) MB"
+
+      - name: Prepare dist-input（准备打包输入目录）
+        shell: pwsh
+        run: |
+          $version = "${{ needs.get-version.outputs.version }}"
+          $jarNameWithVersion = "easy-postman-$version.jar"
+          $jarName = "easy-postman.jar"
+          
+          $distInputDir = "target\dist-input"
+          if (Test-Path $distInputDir) { Remove-Item -Recurse -Force $distInputDir }
+          New-Item -ItemType Directory -Path $distInputDir | Out-Null
+          Copy-Item "target\$jarNameWithVersion" -Destination "$distInputDir\$jarName"
+
+      - name: Create app-image with jpackage（创建应用镜像）
+        shell: pwsh
+        run: |
+          $version = "${{ needs.get-version.outputs.version }}"
+          $jarName = "easy-postman.jar"
+          
+          # 解析通用 Java 选项
+          $javaOptsCommon = $env:JAVA_OPTIONS_COMMON -split '\|'
+          # 解析 Windows 特定选项
+          $javaOptsWindows = $env:JAVA_OPTIONS_WINDOWS -split '\|'
+          
+          # 构建 jpackage 参数列表
+          $jpackageArgs = @(
+            '--type', 'app-image',
+            '--input', 'target\dist-input',
+            '--main-jar', $jarName,
+            '--main-class', 'com.laker.postman.App',
+            '--add-launcher', 'EasyPostmanMCP=build\easy-postman-mcp-launcher.properties',
+            '--runtime-image', 'target\runtime',
+            '--dest', 'target',
+            '--icon', 'assets\win\EasyPostman.ico',
+            '--name', 'EasyPostman',
+            '--app-version', $version,
+            '--vendor', 'Laker',
+            '--copyright', '© 2025 Laker'
+          )
+          
+          # 添加通用 Java 选项
+          foreach ($opt in $javaOptsCommon) {
+            $jpackageArgs += '--java-options'
+            $jpackageArgs += $opt
+          }
+          
+          # 添加 Windows 特定选项
+          foreach ($opt in $javaOptsWindows) {
+            if ($opt -ne '') {
+              $jpackageArgs += '--java-options'
+              $jpackageArgs += $opt
+            }
+          }
+          
+          # 执行 jpackage
+          & jpackage @jpackageArgs
+
+          if (-not (Test-Path "target\EasyPostman\EasyPostmanMCP.exe")) {
+            throw "MCP launcher was not created"
+          }
+          
+          Write-Host "✅ App image created at: target\EasyPostman"
+
+      - name: Verify Windows single-instance behavior（验证 Windows 单实例与强杀恢复）
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          .\build\verify-windows-single-instance.ps1 `
+            -AppExe "target\EasyPostman\EasyPostman.exe"
+
+      - name: Create EXE with Inno Setup（使用 Inno Setup 创建 EXE 安装程序）
+        shell: pwsh
+        run: |
+          $version = "${{ needs.get-version.outputs.version }}"
+          $issScript = "build\easy-postman.iss"
+          $arch = "x64"  # 当前构建为 x64，未来可扩展为 arm64
+          
+          # 确保输出目录存在
+          if (-not (Test-Path "dist")) { 
+            New-Item -ItemType Directory -Path "dist" | Out-Null 
+          }
+          
+          Write-Host "🔨 Building EXE installer with Inno Setup..."
+          Write-Host "   Version: $version"
+          Write-Host "   Architecture: $arch"
+          Write-Host "   Script: $issScript"
+          Write-Host "   Source: target\EasyPostman"
+          
+          # 验证源目录存在
+          if (-not (Test-Path "target\EasyPostman")) {
+            Write-Error "❌ Source directory not found: target\EasyPostman"
+            exit 1
+          }
+          
+          # 运行 Inno Setup 编译器
+          # 注意：路径相对于 ISS 脚本位置（build 目录），所以需要 ..\
+          & iscc `
+            "/DMyAppVersion=$version" `
+            "/DMyAppSourceDir=..\target\EasyPostman" `
+            "/DMyOutputDir=..\dist" `
+            "/DMyArch=$arch" `
+            $issScript
+          
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "❌ Inno Setup compilation failed with exit code: $LASTEXITCODE"
+            exit 1
+          }
+          
+          # 验证 EXE 文件
+          $expectedExeName = "EasyPostman-$version-windows-$arch.exe"
+          $exeFile = Get-Item "dist\$expectedExeName" -ErrorAction SilentlyContinue
+          
+          if ($exeFile) {
+            Write-Host "✅ EXE installer created successfully!"
+            Write-Host "   File: $($exeFile.Name)"
+            Write-Host "   Size: $([math]::Round($exeFile.Length / 1MB, 2)) MB"
+            Write-Host "   Path: $($exeFile.FullName)"
+          } else {
+            Write-Error "❌ Expected EXE file not found: $expectedExeName"
+            Write-Host "Files in dist folder:"
+            Get-ChildItem "dist" | ForEach-Object { Write-Host "  - $($_.Name)" }
+            exit 1
+          }
+
+      - name: Upload as Artifact（上传为构建产物）
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: EasyPostman-Windows-EXE
+          path: dist/*.exe
+          retention-days: 7
+
+  build-macos-intel:
+    name: Build macOS Intel DMG（构建 macOS Intel 版安装包）
+    runs-on: macos-15-intel  # Intel x86_64
+    needs: [ get-version, build-jar-artifact ]
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name || '', 'v')
+
+    steps:
+      - name: Checkout（检出代码）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Java（配置 Java）
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          check-latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download Fat JAR（下载跨平台 Fat JAR）
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: app-jar
+          path: target
+
+      - name: Create runtime with jlink（使用 jlink 创建 macOS Intel 精简 JRE）
+        run: |
+          rm -rf target/runtime
+          # 创建 macOS Intel 平台的 JRE
+          jlink \
+            --add-modules ${{ env.JLINK_MODULES }} \
+            --strip-java-debug-attributes \
+            --strip-native-commands \
+            --strip-debug \
+            --no-header-files \
+            --no-man-pages \
+            --compress=2 \
+            --verbose \
+            --output target/runtime
+          
+          # 验证 JRE 大小
+          echo "✅ JRE 创建成功，大小: $(du -sh target/runtime | cut -f1)"
+
+      - name: Prepare dist-input（准备打包输入目录）
+        run: |
+          VERSION="${{ needs.get-version.outputs.version }}"
+          rm -rf target/dist-input
+          mkdir -p target/dist-input
+          cp target/easy-postman-$VERSION.jar target/dist-input/easy-postman.jar
+
+      - name: Create DMG with jpackage（使用 jpackage 创建 DMG 镜像）
+        run: |
+          VERSION="${{ needs.get-version.outputs.version }}"
+          mkdir -p dist
+          
+          # 解析通用 Java 选项
+          IFS='|' read -ra JAVA_OPTS_COMMON <<< "${{ env.JAVA_OPTIONS_COMMON }}"
+          # 解析 macOS 特定选项
+          IFS='|' read -ra JAVA_OPTS_MACOS <<< "${{ env.JAVA_OPTIONS_MACOS }}"
+          
+          # 构建 jpackage 参数数组
+          JPACKAGE_ARGS=(
+            --input target/dist-input
+            --main-jar "easy-postman.jar"
+            --main-class com.laker.postman.App
+            --add-launcher EasyPostmanMCP=build/easy-postman-mcp-launcher.properties
+            --runtime-image target/runtime
+            --type dmg
+            --name "EasyPostman"
+            --app-version "$VERSION"
+            --dest dist
+            --icon assets/mac/EasyPostman.icns
+            --vendor "Laker"
+            --copyright "© 2025 Laker"
+          )
+          
+          # 添加通用 Java 选项
+          for opt in "${JAVA_OPTS_COMMON[@]}"; do
+            JPACKAGE_ARGS+=(--java-options "$opt")
+          done
+          
+          # 添加 macOS 特定选项
+          for opt in "${JAVA_OPTS_MACOS[@]}"; do
+            if [ -n "$opt" ]; then
+              JPACKAGE_ARGS+=(--java-options "$opt")
+            fi
+          done
+          
+          # 执行 jpackage
+          jpackage "${JPACKAGE_ARGS[@]}"
+          
+          # 重命名为 Intel 版本（使用标准架构标识）
+          mv dist/EasyPostman-$VERSION.dmg dist/EasyPostman-$VERSION-macos-x86_64.dmg
+          echo "✅ Created: EasyPostman-$VERSION-macos-x86_64.dmg"
+
+      - name: Upload as Artifact（上传为构建产物）
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: EasyPostman-macOS-Intel-DMG
+          path: dist/*-macos-x86_64.dmg
+          retention-days: 7
+
+  build-macos-arm:
+    name: Build macOS Apple Silicon DMG（构建 macOS Apple Silicon 版安装包）
+    runs-on: macos-latest  # Apple Silicon (M1/M2/M3/M4)
+    needs: [ get-version, build-jar-artifact ]
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name || '', 'v')
+
+    steps:
+      - name: Checkout（检出代码）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Java（配置 Java）
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          check-latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download Fat JAR（下载跨平台 Fat JAR）
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: app-jar
+          path: target
+
+      - name: Create runtime with jlink（使用 jlink 创建 macOS ARM 精简 JRE）
+        run: |
+          rm -rf target/runtime
+          # 创建 macOS ARM 平台的 JRE
+          jlink \
+            --add-modules ${{ env.JLINK_MODULES }} \
+            --strip-java-debug-attributes \
+            --strip-native-commands \
+            --strip-debug \
+            --no-header-files \
+            --no-man-pages \
+            --compress=2 \
+            --verbose \
+            --output target/runtime
+          
+          # 验证 JRE 大小
+          echo "✅ JRE 创建成功，大小: $(du -sh target/runtime | cut -f1)"
+
+      - name: Prepare dist-input（准备打包输入目录）
+        run: |
+          VERSION="${{ needs.get-version.outputs.version }}"
+          rm -rf target/dist-input
+          mkdir -p target/dist-input
+          cp target/easy-postman-$VERSION.jar target/dist-input/easy-postman.jar
+
+      - name: Create DMG with jpackage（使用 jpackage 创建 DMG 镜像）
+        run: |
+          VERSION="${{ needs.get-version.outputs.version }}"
+          mkdir -p dist
+          
+          # 解析通用 Java 选项
+          IFS='|' read -ra JAVA_OPTS_COMMON <<< "${{ env.JAVA_OPTIONS_COMMON }}"
+          # 解析 macOS 特定选项
+          IFS='|' read -ra JAVA_OPTS_MACOS <<< "${{ env.JAVA_OPTIONS_MACOS }}"
+          
+          # 构建 jpackage 参数数组
+          JPACKAGE_ARGS=(
+            --input target/dist-input
+            --main-jar "easy-postman.jar"
+            --main-class com.laker.postman.App
+            --add-launcher EasyPostmanMCP=build/easy-postman-mcp-launcher.properties
+            --runtime-image target/runtime
+            --type dmg
+            --name "EasyPostman"
+            --app-version "$VERSION"
+            --dest dist
+            --icon assets/mac/EasyPostman.icns
+            --vendor "Laker"
+            --copyright "© 2025 Laker"
+          )
+          
+          # 添加通用 Java 选项
+          for opt in "${JAVA_OPTS_COMMON[@]}"; do
+            JPACKAGE_ARGS+=(--java-options "$opt")
+          done
+          
+          # 添加 macOS 特定选项
+          for opt in "${JAVA_OPTS_MACOS[@]}"; do
+            if [ -n "$opt" ]; then
+              JPACKAGE_ARGS+=(--java-options "$opt")
+            fi
+          done
+          
+          # 执行 jpackage
+          jpackage "${JPACKAGE_ARGS[@]}"
+          
+          # 重命名为 ARM 版本（使用标准架构标识）
+          mv dist/EasyPostman-$VERSION.dmg dist/EasyPostman-$VERSION-macos-arm64.dmg
+          echo "✅ Created: EasyPostman-$VERSION-macos-arm64.dmg"
+
+      - name: Upload as Artifact（上传为构建产物）
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: EasyPostman-macOS-ARM-DMG
+          path: dist/*-macos-arm64.dmg
+          retention-days: 7
+
+  build-jar:
+    name: Build Standalone JAR（构建独立 JAR 包）
+    runs-on: ubuntu-latest
+    needs: [ get-version, build-jar-artifact ]
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name || '', 'v')
+
+    steps:
+      - name: Download JAR artifact（下载已构建的 JAR）
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: app-jar
+          path: dist
+
+      - name: Upload as Artifact（上传为构建产物）
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: EasyPostman-Standalone-JAR
+          path: dist/*.jar
+          retention-days: 7
+
+  build-ubuntu-amd64:
+    name: Build Ubuntu DEB amd64（构建 Ubuntu x64 安装包）
+    runs-on: ubuntu-22.04
+    needs: [ get-version, build-jar-artifact ]
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name || '', 'v')
+
+    steps:
+      - name: Checkout（检出代码）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Java（配置 Java）
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          check-latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download Fat JAR（下载跨平台 Fat JAR）
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: app-jar
+          path: target
+
+      - name: Install dependencies（安装系统依赖）
+        run: |
+          sudo apt-get update
+          # 安装 GTK3、WebKit、打包工具，以及 DEB 兼容重打包所需压缩工具
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev binutils zstd xz-utils
+
+      - name: Create runtime with jlink（使用 jlink 创建 Linux 精简 JRE）
+        run: |
+          rm -rf target/runtime
+          # 创建 Linux 平台的 JRE
+          jlink \
+            --add-modules ${{ env.JLINK_MODULES }} \
+            --strip-debug \
+            --no-header-files \
+            --no-man-pages \
+            --compress=2 \
+            --output target/runtime
+
+      - name: Prepare dist-input（准备打包输入目录）
+        run: |
+          VERSION="${{ needs.get-version.outputs.version }}"
+          rm -rf target/dist-input
+          mkdir -p target/dist-input
+          cp target/easy-postman-$VERSION.jar target/dist-input/easy-postman.jar
+
+      - name: Create DEB with jpackage（使用 jpackage 创建 DEB 安装包）
+        run: |
+          VERSION="${{ needs.get-version.outputs.version }}"
+          mkdir -p dist
+          
+          # 解析通用 Java 选项
+          IFS='|' read -ra JAVA_OPTS_COMMON <<< "${{ env.JAVA_OPTIONS_COMMON }}"
+          # 解析 Linux 特定选项
+          IFS='|' read -ra JAVA_OPTS_LINUX <<< "${{ env.JAVA_OPTIONS_LINUX }}"
+          
+          # 构建 jpackage 参数数组
+          JPACKAGE_ARGS=(
+            --input target/dist-input
+            --main-jar "easy-postman.jar"
+            --main-class com.laker.postman.App
+            --add-launcher EasyPostmanMCP=build/easy-postman-mcp-launcher.properties
+            --runtime-image target/runtime
+            --type deb
+            --name "EasyPostman"
+            --app-version "$VERSION"
+            --dest dist
+            --vendor "Laker"
+            --copyright "© 2025 Laker"
+            --description "A modern API testing tool similar to Postman"
+            --linux-shortcut
+            --linux-menu-group "Development"
+            --linux-app-category "Development"
+          )
+          
+          # 添加通用 Java 选项
+          for opt in "${JAVA_OPTS_COMMON[@]}"; do
+            JPACKAGE_ARGS+=(--java-options "$opt")
+          done
+          
+          # 添加 Linux 特定选项
+          for opt in "${JAVA_OPTS_LINUX[@]}"; do
+            if [ -n "$opt" ]; then
+              JPACKAGE_ARGS+=(--java-options "$opt")
+            fi
+          done
+          
+          # 执行 jpackage
+          jpackage "${JPACKAGE_ARGS[@]}"
+
+      - name: Rename amd64 DEB to stable release name（统一 amd64 包名）
+        run: |
+          VERSION="${{ needs.get-version.outputs.version }}"
+          ORIGINAL_DEB=$(find dist -maxdepth 1 -type f -name "*.deb" | sort | tail -n 1)
+          if [ -z "$ORIGINAL_DEB" ]; then
+            echo "No DEB file available for renaming" >&2
+            exit 1
+          fi
+
+          TARGET_DEB="dist/EasyPostman-${VERSION}-linux-amd64.deb"
+          mv "$ORIGINAL_DEB" "$TARGET_DEB"
+
+          echo "Generated amd64 DEB:"
+          ls -1 "$TARGET_DEB"
+
+      - name: Upload as Artifact（上传为构建产物）
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: EasyPostman-Ubuntu-DEB-amd64
+          path: dist/*-linux-amd64.deb
+          retention-days: 7
+
+  build-ubuntu-arm64:
+    name: Build Ubuntu DEB arm64（构建 Ubuntu ARM64 安装包）
+    runs-on: ubuntu-22.04-arm
+    needs: [ get-version, build-jar-artifact ]
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name || '', 'v')
+
+    steps:
+      - name: Checkout（检出代码）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Java（配置 Java）
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          check-latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download Fat JAR（下载跨平台 Fat JAR）
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: app-jar
+          path: target
+
+      - name: Install dependencies（安装系统依赖）
+        run: |
+          sudo apt-get update
+          # 安装 GTK3、WebKit 和打包工具
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev binutils
+
+      - name: Create runtime with jlink（使用 jlink 创建 Linux 精简 JRE）
+        run: |
+          rm -rf target/runtime
+          # 创建 Linux 平台的 JRE
+          jlink \
+            --add-modules ${{ env.JLINK_MODULES }} \
+            --strip-debug \
+            --no-header-files \
+            --no-man-pages \
+            --compress=2 \
+            --output target/runtime
+
+      - name: Prepare dist-input（准备打包输入目录）
+        run: |
+          VERSION="${{ needs.get-version.outputs.version }}"
+          rm -rf target/dist-input
+          mkdir -p target/dist-input
+          cp target/easy-postman-$VERSION.jar target/dist-input/easy-postman.jar
+
+      - name: Create DEB with jpackage（使用 jpackage 创建 DEB 安装包）
+        run: |
+          VERSION="${{ needs.get-version.outputs.version }}"
+          mkdir -p dist
+          
+          # 解析通用 Java 选项
+          IFS='|' read -ra JAVA_OPTS_COMMON <<< "${{ env.JAVA_OPTIONS_COMMON }}"
+          # 解析 Linux 特定选项
+          IFS='|' read -ra JAVA_OPTS_LINUX <<< "${{ env.JAVA_OPTIONS_LINUX }}"
+          
+          # 构建 jpackage 参数数组
+          JPACKAGE_ARGS=(
+            --input target/dist-input
+            --main-jar "easy-postman.jar"
+            --main-class com.laker.postman.App
+            --add-launcher EasyPostmanMCP=build/easy-postman-mcp-launcher.properties
+            --runtime-image target/runtime
+            --type deb
+            --name "EasyPostman"
+            --app-version "$VERSION"
+            --dest dist
+            --vendor "Laker"
+            --copyright "© 2025 Laker"
+            --description "A modern API testing tool similar to Postman"
+            --linux-shortcut
+            --linux-menu-group "Development"
+            --linux-app-category "Development"
+          )
+          
+          # 添加通用 Java 选项
+          for opt in "${JAVA_OPTS_COMMON[@]}"; do
+            JPACKAGE_ARGS+=(--java-options "$opt")
+          done
+          
+          # 添加 Linux 特定选项
+          for opt in "${JAVA_OPTS_LINUX[@]}"; do
+            if [ -n "$opt" ]; then
+              JPACKAGE_ARGS+=(--java-options "$opt")
+            fi
+          done
+          
+          # 执行 jpackage
+          jpackage "${JPACKAGE_ARGS[@]}"
+
+      - name: Create generic and compatibility ARM64 variants（生成通用 ARM64 和兼容版安装包）
+        run: |
+          VERSION="${{ needs.get-version.outputs.version }}"
+          ORIGINAL_DEB=$(find dist -maxdepth 1 -type f -name "*.deb" | sort | tail -n 1)
+          if [ -z "$ORIGINAL_DEB" ]; then
+            echo "No DEB file available for renaming" >&2
+            exit 1
+          fi
+
+          GENERIC_DEB="dist/EasyPostman-${VERSION}-linux-arm64.deb"
+          COMPAT_DEB="dist/EasyPostman-${VERSION}-linux-arm64-compat.deb"
+
+          mv "$ORIGINAL_DEB" "$GENERIC_DEB"
+          cp "$GENERIC_DEB" "$COMPAT_DEB"
+
+          bash build/repack-deb-to-xz.sh "$COMPAT_DEB"
+
+          echo "Generated ARM64 packages:"
+          ls -1 "$GENERIC_DEB" "$COMPAT_DEB"
+          echo "Compatibility package members:"
+          ar t "$COMPAT_DEB"
+
+      - name: Upload as Artifact（上传为构建产物）
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: EasyPostman-Ubuntu-DEB-arm64
+          path: |
+            dist/*-linux-arm64.deb
+            dist/*-linux-arm64-compat.deb
+          retention-days: 7
+
+  build-rpm-amd64:
+    name: Build RPM amd64（构建 RPM x64 安装包）
+    runs-on: ubuntu-22.04
+    needs: [ get-version, build-jar-artifact ]
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name || '', 'v')
+
+    steps:
+      - name: Checkout（检出代码）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Java（配置 Java）
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          check-latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download Fat JAR（下载跨平台 Fat JAR）
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: app-jar
+          path: target
+
+      - name: Install dependencies（安装系统依赖）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev binutils rpm
+
+      - name: Create runtime with jlink（使用 jlink 创建 Linux 精简 JRE）
+        run: |
+          rm -rf target/runtime
+          jlink \
+            --add-modules ${{ env.JLINK_MODULES }} \
+            --strip-debug \
+            --no-header-files \
+            --no-man-pages \
+            --compress=2 \
+            --output target/runtime
+
+      - name: Prepare dist-input（准备打包输入目录）
+        run: |
+          VERSION="${{ needs.get-version.outputs.version }}"
+          rm -rf target/dist-input
+          mkdir -p target/dist-input
+          cp target/easy-postman-$VERSION.jar target/dist-input/easy-postman.jar
+
+      - name: Create RPM with jpackage（使用 jpackage 创建 RPM 安装包）
+        run: |
+          VERSION="${{ needs.get-version.outputs.version }}"
+          mkdir -p dist
+          
+          IFS='|' read -ra JAVA_OPTS_COMMON <<< "${{ env.JAVA_OPTIONS_COMMON }}"
+          IFS='|' read -ra JAVA_OPTS_LINUX <<< "${{ env.JAVA_OPTIONS_LINUX }}"
+          
+          JPACKAGE_ARGS=(
+            --input target/dist-input
+            --main-jar "easy-postman.jar"
+            --main-class com.laker.postman.App
+            --add-launcher EasyPostmanMCP=build/easy-postman-mcp-launcher.properties
+            --runtime-image target/runtime
+            --type rpm
+            --name "EasyPostman"
+            --app-version "$VERSION"
+            --dest dist
+            --vendor "Laker"
+            --copyright "© 2025 Laker"
+            --description "A modern API testing tool similar to Postman"
+            --linux-shortcut
+            --linux-menu-group "Development"
+            --linux-app-category "Development"
+            --linux-rpm-license-type "MIT"
+          )
+          
+          for opt in "${JAVA_OPTS_COMMON[@]}"; do
+            JPACKAGE_ARGS+=(--java-options "$opt")
+          done
+          
+          for opt in "${JAVA_OPTS_LINUX[@]}"; do
+            if [ -n "$opt" ]; then
+              JPACKAGE_ARGS+=(--java-options "$opt")
+            fi
+          done
+          
+          jpackage "${JPACKAGE_ARGS[@]}"
+
+      - name: Upload as Artifact（上传为构建产物）
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: EasyPostman-RPM-amd64
+          path: dist/*.rpm
+          retention-days: 7
+
+  build-rpm-arm64:
+    name: Build RPM arm64（构建 RPM ARM64 安装包）
+    runs-on: ubuntu-22.04-arm
+    needs: [ get-version, build-jar-artifact ]
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name || '', 'v')
+
+    steps:
+      - name: Checkout（检出代码）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Java（配置 Java）
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+          check-latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download Fat JAR（下载跨平台 Fat JAR）
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: app-jar
+          path: target
+
+      - name: Install dependencies（安装系统依赖）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev binutils rpm
+
+      - name: Create runtime with jlink（使用 jlink 创建 Linux 精简 JRE）
+        run: |
+          rm -rf target/runtime
+          jlink \
+            --add-modules ${{ env.JLINK_MODULES }} \
+            --strip-debug \
+            --no-header-files \
+            --no-man-pages \
+            --compress=2 \
+            --output target/runtime
+
+      - name: Prepare dist-input（准备打包输入目录）
+        run: |
+          VERSION="${{ needs.get-version.outputs.version }}"
+          rm -rf target/dist-input
+          mkdir -p target/dist-input
+          cp target/easy-postman-$VERSION.jar target/dist-input/easy-postman.jar
+
+      - name: Create RPM with jpackage（使用 jpackage 创建 RPM 安装包）
+        run: |
+          VERSION="${{ needs.get-version.outputs.version }}"
+          mkdir -p dist
+          
+          IFS='|' read -ra JAVA_OPTS_COMMON <<< "${{ env.JAVA_OPTIONS_COMMON }}"
+          IFS='|' read -ra JAVA_OPTS_LINUX <<< "${{ env.JAVA_OPTIONS_LINUX }}"
+          
+          JPACKAGE_ARGS=(
+            --input target/dist-input
+            --main-jar "easy-postman.jar"
+            --main-class com.laker.postman.App
+            --add-launcher EasyPostmanMCP=build/easy-postman-mcp-launcher.properties
+            --runtime-image target/runtime
+            --type rpm
+            --name "EasyPostman"
+            --app-version "$VERSION"
+            --dest dist
+            --vendor "Laker"
+            --copyright "© 2025 Laker"
+            --description "A modern API testing tool similar to Postman"
+            --linux-shortcut
+            --linux-menu-group "Development"
+            --linux-app-category "Development"
+            --linux-rpm-license-type "MIT"
+          )
+          
+          for opt in "${JAVA_OPTS_COMMON[@]}"; do
+            JPACKAGE_ARGS+=(--java-options "$opt")
+          done
+          
+          for opt in "${JAVA_OPTS_LINUX[@]}"; do
+            if [ -n "$opt" ]; then
+              JPACKAGE_ARGS+=(--java-options "$opt")
+            fi
+          done
+          
+          jpackage "${JPACKAGE_ARGS[@]}"
+
+      - name: Upload as Artifact（上传为构建产物）
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: EasyPostman-RPM-arm64
+          path: dist/*.rpm
+          retention-days: 7
+
+  # ============================================================
+  # 统一上传所有平台文件到 GitHub Release
+  # 使用 softprops/action-gh-release@v2，触发条件：release 事件
+  # always() 保证即使部分构建失败也能上传成功的文件
+  # ============================================================
+  upload-to-github-release:
+    name: Upload All to GitHub Release（统一上传到 GitHub Release）
+    if: always() && (github.event_name != 'release' || startsWith(github.event.release.tag_name || '', 'v')) && github.event_name == 'release'
+    needs: [ build-windows-portable, build-windows-exe, build-macos-intel, build-macos-arm, build-jar, build-ubuntu-amd64, build-ubuntu-arm64, build-rpm-amd64, build-rpm-arm64 ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all release artifacts（下载所有平台构建产物）
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: all-artifacts
+          pattern: EasyPostman-*
+          merge-multiple: true
+
+      - name: List downloaded files（列出所有下载文件）
+        run: |
+          echo "📦 Downloaded artifacts:"
+          find all-artifacts -type f | sort
+
+      - name: Upload all files to GitHub Release（上传所有文件到 Release）
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: |
+            all-artifacts/*-portable.zip
+            all-artifacts/*.exe
+            all-artifacts/*-macos-x86_64.dmg
+            all-artifacts/*-macos-arm64.dmg
+            all-artifacts/*.jar
+            all-artifacts/*.deb
+            all-artifacts/*.rpm
+          fail_on_unmatched_files: false
+          overwrite_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ============================================================
+  # 检查是否至少有一个构建成功（用于 Gitee 同步前置判断）
+  # ============================================================
+  check-any-build-success:
+    name: Check Any Build Success（检查至少一个构建成功）
+    if: |
+      (github.event_name != 'release' || startsWith(github.event.release.tag_name || '', 'v')) &&
+      github.event_name == 'release' &&
+      always()
+    needs: [ build-jar, build-windows-portable, build-windows-exe, build-macos-arm ]
+    runs-on: ubuntu-latest
+    outputs:
+      should_create_release: ${{ steps.check.outputs.should_create }}
+
+    steps:
+      - name: Check if any build succeeded（检查是否有任何构建成功）
+        id: check
+        run: |
+          echo "📊 检查构建状态..."
+          echo "  Standalone JAR: ${{ needs.build-jar.result }}"
+          echo "  Windows Portable: ${{ needs.build-windows-portable.result }}"
+          echo "  Windows EXE: ${{ needs.build-windows-exe.result }}"
+          echo "  macOS ARM: ${{ needs.build-macos-arm.result }}"
+          
+          # 只要有一个成功就创建 Release
+          if [ "${{ needs.build-jar.result }}" == "success" ] || \
+             [ "${{ needs.build-windows-portable.result }}" == "success" ] || \
+             [ "${{ needs.build-windows-exe.result }}" == "success" ] || \
+             [ "${{ needs.build-macos-arm.result }}" == "success" ]; then
+            echo "✅ 至少有一个构建成功，可以创建 Gitee Release"
+            echo "should_create=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ 所有构建都失败，跳过创建 Gitee Release"
+            echo "should_create=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+  # ============================================================
+  # 校验 Gitee 附件大小（超过 100MB 直接失败）
+  # ============================================================
+  verify-gitee-assets:
+    name: Verify Gitee Assets（校验 Gitee 附件大小）
+    if: (github.event_name != 'release' || startsWith(github.event.release.tag_name || '', 'v')) && github.event_name == 'release' && needs.check-any-build-success.outputs.should_create_release == 'true'
+    needs: [ check-any-build-success, build-jar, build-windows-portable, build-windows-exe, build-macos-arm ]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download standalone JAR artifact（下载独立 JAR 产物）
+        if: needs.build-jar.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: EasyPostman-Standalone-JAR
+          path: verify/jar
+
+      - name: Download Windows Portable artifact（下载 Windows 绿色版产物）
+        if: needs.build-windows-portable.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: EasyPostman-Windows-Portable
+          path: verify/windows-portable
+
+      - name: Download Windows EXE artifact（下载 Windows EXE 产物）
+        if: needs.build-windows-exe.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: EasyPostman-Windows-EXE
+          path: verify/windows-exe
+
+      - name: Download macOS ARM artifact（下载 macOS ARM 产物）
+        if: needs.build-macos-arm.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: EasyPostman-macOS-ARM-DMG
+          path: verify/macos-arm
+
+      - name: Validate asset size（校验附件大小）
+        run: |
+          validate_file() {
+            FILE="$1"
+            LABEL="$2"
+            if [ ! -f "$FILE" ]; then
+              echo "❌ Missing expected artifact for $LABEL: $FILE"
+              exit 1
+            fi
+
+            FILE_SIZE=$(stat -c%s "$FILE" 2>/dev/null || stat -f%z "$FILE")
+            FILE_SIZE_MB=$(echo "scale=2; $FILE_SIZE/1048576" | bc)
+            echo "📏 $LABEL: ${FILE_SIZE_MB} MB"
+
+            if [ "$FILE_SIZE" -gt 104857600 ]; then
+              echo "❌ $LABEL exceeds Gitee 100MB limit: ${FILE_SIZE_MB} MB"
+              exit 1
+            fi
+          }
+
+          if [ "${{ needs.build-jar.result }}" = "success" ]; then
+            validate_file "$(find verify/jar -name '*.jar' | head -n 1)" "Standalone JAR"
+          fi
+
+          if [ "${{ needs.build-windows-portable.result }}" = "success" ]; then
+            validate_file "$(find verify/windows-portable -name '*-portable.zip' | head -n 1)" "Windows Portable"
+          fi
+
+          if [ "${{ needs.build-windows-exe.result }}" = "success" ]; then
+            validate_file "$(find verify/windows-exe -name '*.exe' | head -n 1)" "Windows EXE"
+          fi
+
+          if [ "${{ needs.build-macos-arm.result }}" = "success" ]; then
+            validate_file "$(find verify/macos-arm -name '*-macos-arm64.dmg' | head -n 1)" "macOS ARM"
+          fi
+
+  # ============================================================
+  # 创建 Gitee Release
+  # ============================================================
+  create-gitee-release:
+    name: Create Gitee Release（创建 Gitee Release）
+    if: (github.event_name != 'release' || startsWith(github.event.release.tag_name || '', 'v')) && github.event_name == 'release' && needs.check-any-build-success.outputs.should_create_release == 'true'
+    needs: [ get-version, check-any-build-success, verify-gitee-assets ]
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.gitee_release.outputs.release_id }}
+      tag_name: ${{ steps.get_version.outputs.tag }}
+
+    steps:
+      - name: Get version from tag（从标签获取版本号）
+        id: get_version
+        run: |
+          TAG_NAME="${{ github.event.release.tag_name }}"
+          VERSION="${TAG_NAME#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
+
+      - name: Create Gitee Release（创建 Gitee Release）
+        id: gitee_release
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          VERSION="${{ steps.get_version.outputs.version }}"
+          TAG_NAME="${{ steps.get_version.outputs.tag }}"
+          RELEASE_BODY="${{ github.event.release.body }}"
+          
+          if [ -z "$RELEASE_BODY" ]; then
+            RELEASE_BODY="EasyPostman ${VERSION} 发布版本，支持 Windows、macOS 和 Linux。"
+          fi
+          
+          # 把 body 写入临时文件，方便处理特殊字符
+          BODY_FILE="/tmp/release_body.txt"
+          printf '%s\n' "${RELEASE_BODY}" > "$BODY_FILE"
+
+          echo "🚀 Creating Gitee Release for tag: $TAG_NAME"
+
+          if [ -z "${GITEE_TOKEN:-}" ]; then
+            echo "❌ Missing GITEE_TOKEN secret"
+            exit 1
+          fi
+
+          RESPONSE_FILE="/tmp/release.json"
+          GITEE_RELEASES_API="https://gitee.com/api/v5/repos/lakernote/easy-postman/releases"
+          RELEASE_ID=""
+
+          resolve_existing_release() {
+            local curl_exit_code
+            local http_code
+
+            if http_code=$(curl -sS -o "$RESPONSE_FILE" -w "%{http_code}" \
+                --retry 3 \
+                --retry-delay 2 \
+                --retry-all-errors \
+                --connect-timeout 30 \
+                --max-time 60 \
+                --get \
+                --data-urlencode "access_token=${GITEE_TOKEN}" \
+                "${GITEE_RELEASES_API}/tags/${TAG_NAME}"); then
+              curl_exit_code=0
+            else
+              curl_exit_code=$?
+            fi
+
+            if [ "$curl_exit_code" -eq 0 ] && [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+              RELEASE_ID=$(jq -r '.id // empty' "$RESPONSE_FILE" 2>/dev/null || true)
+            fi
+          }
+
+          # A rerun may encounter a release created by an earlier partial run.
+          resolve_existing_release
+
+          if [ -n "$RELEASE_ID" ]; then
+            echo "✅ Reusing existing Gitee Release with ID: $RELEASE_ID"
+          else
+            if HTTP_CODE=$(curl -sS -o "$RESPONSE_FILE" -w "%{http_code}" \
+                --retry 3 \
+                --retry-delay 2 \
+                --retry-all-errors \
+                --connect-timeout 30 \
+                --max-time 60 \
+                -X POST \
+                -F "access_token=${GITEE_TOKEN}" \
+                -F "tag_name=$TAG_NAME" \
+                -F "name=$TAG_NAME" \
+                -F "body=<${BODY_FILE}" \
+                -F "prerelease=false" \
+                -F "target_commitish=master" \
+                "$GITEE_RELEASES_API"); then
+              CURL_EXIT_CODE=0
+            else
+              CURL_EXIT_CODE=$?
+            fi
+
+            echo "curl exit code: $CURL_EXIT_CODE"
+            echo "HTTP Status Code: $HTTP_CODE"
+
+            if [ $CURL_EXIT_CODE -eq 0 ] && [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+              RELEASE_ID=$(jq -r '.id // empty' "$RESPONSE_FILE" 2>/dev/null || true)
+            else
+              # The create request may have succeeded even if its response was lost.
+              echo "⚠️ Create request failed; checking whether the release now exists..."
+              resolve_existing_release
+            fi
+          fi
+
+          if [ -z "$RELEASE_ID" ]; then
+            echo "❌ Failed to create or resolve Gitee Release for tag $TAG_NAME"
+            cat "$RESPONSE_FILE" 2>/dev/null || echo "No response file"
+            exit 1
+          fi
+
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+          echo "✅ Gitee Release created successfully with ID: $RELEASE_ID"
+
+  # 跨平台 JAR 上传到 Gitee
+  sync-jar-to-gitee:
+    name: Upload Standalone JAR to Gitee（上传独立 JAR 到 Gitee）
+    if: (github.event_name != 'release' || startsWith(github.event.release.tag_name || '', 'v')) && github.event_name == 'release' && needs.build-jar.result == 'success'
+    needs: [ create-gitee-release, build-jar ]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout（检出代码）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download standalone JAR artifact（下载独立 JAR 产物）
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: EasyPostman-Standalone-JAR
+          path: artifacts
+
+      - name: Upload standalone JAR to Gitee（上传独立 JAR 到 Gitee）
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          RELEASE_ID="${{ needs.create-gitee-release.outputs.release_id }}"
+          FILE=$(find artifacts -name "*.jar" | head -n 1)
+          bash .github/scripts/upload-gitee-release-asset.sh "$RELEASE_ID" "$FILE"
+
+  # Windows 绿色版上传到 Gitee
+  sync-windows-portable-to-gitee:
+    name: Upload Windows Portable to Gitee（上传 Windows 绿色版到 Gitee）
+    if: (github.event_name != 'release' || startsWith(github.event.release.tag_name || '', 'v')) && github.event_name == 'release' && needs.build-windows-portable.result == 'success'
+    needs: [ create-gitee-release, build-windows-portable ]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout（检出代码）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download Windows Portable artifact（下载 Windows 绿色版产物）
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: EasyPostman-Windows-Portable
+          path: artifacts
+
+      - name: Upload Windows Portable to Gitee（上传 Windows 绿色版到 Gitee）
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          RELEASE_ID="${{ needs.create-gitee-release.outputs.release_id }}"
+          FILE=$(find artifacts -name "*-portable.zip" | head -n 1)
+          bash .github/scripts/upload-gitee-release-asset.sh "$RELEASE_ID" "$FILE"
+
+  # Windows EXE 上传到 Gitee
+  sync-windows-exe-to-gitee:
+    name: Upload Windows EXE to Gitee（上传 Windows EXE 到 Gitee）
+    if: (github.event_name != 'release' || startsWith(github.event.release.tag_name || '', 'v')) && github.event_name == 'release' && needs.build-windows-exe.result == 'success'
+    needs: [ create-gitee-release, build-windows-exe ]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout（检出代码）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download Windows EXE artifact（下载 Windows EXE 产物）
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: EasyPostman-Windows-EXE
+          path: artifacts
+
+      - name: Upload Windows EXE to Gitee（上传 Windows EXE 到 Gitee）
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          RELEASE_ID="${{ needs.create-gitee-release.outputs.release_id }}"
+          FILE=$(find artifacts -name "*.exe" | head -n 1)
+          bash .github/scripts/upload-gitee-release-asset.sh "$RELEASE_ID" "$FILE"
+
+  # macOS ARM 上传到 Gitee
+  sync-macos-to-gitee:
+    name: Upload macOS ARM to Gitee（上传 macOS ARM 到 Gitee）
+    if: (github.event_name != 'release' || startsWith(github.event.release.tag_name || '', 'v')) && github.event_name == 'release' && needs.build-macos-arm.result == 'success'
+    needs: [ create-gitee-release, build-macos-arm ]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout（检出代码）
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download macOS ARM artifact（下载 macOS ARM 产物）
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: EasyPostman-macOS-ARM-DMG
+          path: artifacts
+
+      - name: Upload macOS ARM to Gitee（上传 macOS ARM 到 Gitee）
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          RELEASE_ID="${{ needs.create-gitee-release.outputs.release_id }}"
+          FILE=$(find artifacts -name "*-macos-arm64.dmg" | head -n 1)
+          bash .github/scripts/upload-gitee-release-asset.sh "$RELEASE_ID" "$FILE"
+
+  # 汇总结果
+  sync-summary:
+    name: Sync Summary（同步汇总）
+    if: |
+      (github.event_name != 'release' || startsWith(github.event.release.tag_name || '', 'v')) &&
+      github.event_name == 'release' &&
+      always()
+    needs: [ check-any-build-success, verify-gitee-assets, create-gitee-release, sync-jar-to-gitee, sync-windows-portable-to-gitee, sync-windows-exe-to-gitee, sync-macos-to-gitee ]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Summary（汇总）
+        run: |
+          echo "📊 Gitee Release 同步完成！"
+          
+          CHECK_STATUS="${{ needs.check-any-build-success.result }}"
+          VERIFY_STATUS="${{ needs.verify-gitee-assets.result }}"
+          RELEASE_STATUS="${{ needs.create-gitee-release.result }}"
+          JAR_STATUS="${{ needs.sync-jar-to-gitee.result }}"
+          PORTABLE_STATUS="${{ needs.sync-windows-portable-to-gitee.result }}"
+          EXE_STATUS="${{ needs.sync-windows-exe-to-gitee.result }}"
+          MACOS_STATUS="${{ needs.sync-macos-to-gitee.result }}"
+          
+          echo ""
+          echo "🔍 构建检查结果: $CHECK_STATUS"
+          echo "📏 Gitee 附件校验: $VERIFY_STATUS"
+          echo "📝 Gitee Release 创建: $RELEASE_STATUS"
+          
+          if [ "$RELEASE_STATUS" == "success" ]; then
+            echo "📍 Release URL: https://gitee.com/lakernote/easy-postman/releases/${{ needs.create-gitee-release.outputs.tag_name }}"
+          fi
+          
+          echo ""
+          echo "已同步到 Gitee 的文件："
+          echo "  ☕ Standalone JAR - $JAR_STATUS"
+          echo "  📦 Windows Portable (绿色版) - $PORTABLE_STATUS"
+          echo "  🪟 Windows EXE (安装包) - $EXE_STATUS"
+          echo "  🍎 macOS Apple Silicon (ARM64) - $MACOS_STATUS"
+          echo ""
+
+          if [ "$CHECK_STATUS" == "failure" ]; then
+            echo "❌ 所有构建都失败，未创建 Gitee Release"
+            exit 1
+          fi
+
+          if [ "$VERIFY_STATUS" == "failure" ] || [ "$RELEASE_STATUS" == "failure" ] || \
+             [ "$JAR_STATUS" == "failure" ] || [ "$PORTABLE_STATUS" == "failure" ] || \
+             [ "$EXE_STATUS" == "failure" ] || [ "$MACOS_STATUS" == "failure" ]; then
+            echo "❌ Gitee Release 流程存在失败步骤"
+            exit 1
+          fi
+
+          echo "✅ Gitee Release 创建成功，附件上传完成"

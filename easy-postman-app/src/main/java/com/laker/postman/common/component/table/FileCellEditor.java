@@ -1,0 +1,186 @@
+package com.laker.postman.common.component.table;
+
+import com.formdev.flatlaf.extras.FlatSVGIcon;
+import com.formdev.flatlaf.util.SystemFileChooser;
+import com.laker.postman.common.constants.ModernColors;
+import com.laker.postman.util.FileChooserUtil;
+
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.io.File;
+
+/**
+ * 文件选择单元格编辑器
+ * 增强版：支持文件预览、文件类型过滤、最近路径记忆
+ */
+public class FileCellEditor extends DefaultCellEditor {
+    private static final String BUTTON_BASE_BACKGROUND_PROPERTY = "EasyPostman.fileCellEditor.buttonBaseBackground";
+
+    private final JPanel editorPanel;
+    private final JButton browseButton;
+    private final JTextField pathField;
+    private String filePath;
+    private final Component parentComponent;
+
+    // 记住最近打开的目录
+    private File lastDirectory = null;
+
+    // 可选的文件类型过滤器
+    private transient SystemFileChooser.FileNameExtensionFilter fileFilter = null;
+
+    public FileCellEditor(Component parentComponent) {
+        super(new JCheckBox());
+        this.parentComponent = parentComponent;
+
+        // 创建面板，使用BorderLayout
+        editorPanel = new JPanel(new BorderLayout(5, 0));
+        final Color tableBackground = ModernColors.getCardBackgroundColor();
+        editorPanel.setBackground(tableBackground);
+
+        // 创建文本字段显示路径
+        pathField = new JTextField();
+        pathField.setBorder(BorderFactory.createEmptyBorder(2, 5, 2, 5));
+
+        // 创建浏览按钮
+        browseButton = new JButton();
+        // 创建图标并设置颜色过滤器以适配主题
+        FlatSVGIcon fileIcon = new FlatSVGIcon("icons/file.svg", TableUIConstants.ICON_SIZE, TableUIConstants.ICON_SIZE);
+        fileIcon.setColorFilter(new FlatSVGIcon.ColorFilter(color -> ModernColors.getTextPrimary()));
+        browseButton.setIcon(fileIcon);
+        browseButton.setText("Browse");
+        browseButton.setMargin(new Insets(2, 8, 2, 8));
+        browseButton.setFocusPainted(false);
+        browseButton.setBackground(tableBackground);
+        browseButton.putClientProperty(BUTTON_BASE_BACKGROUND_PROPERTY, tableBackground);
+        browseButton.setForeground(TableUIConstants.getFileButtonTextColor());
+        browseButton.setBorder(TableUIConstants.createButtonBorder());
+        browseButton.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+
+        // 为浏览按钮添加悬停效果
+        browseButton.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseEntered(MouseEvent e) {
+                browseButton.setBackground(TableUIConstants.getHoverColor());
+            }
+
+            @Override
+            public void mouseExited(MouseEvent e) {
+                browseButton.setBackground(getButtonBaseBackground());
+            }
+        });
+
+        // 设置按钮点击事件
+        browseButton.addActionListener(e -> openFileChooser());
+
+        // 也可以通过双击文本框选择文件
+        pathField.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                if (e.getClickCount() == 2) {
+                    openFileChooser();
+                }
+            }
+        });
+
+        // 将组件添加到面板
+        editorPanel.add(pathField, BorderLayout.CENTER);
+        editorPanel.add(browseButton, BorderLayout.EAST);
+    }
+
+    /**
+     * 设置文件类型过滤器
+     *
+     * @param description 过滤器描述
+     * @param extensions  文件扩展名，如 "json", "txt"
+     */
+    public void setFileFilter(String description, String... extensions) {
+        if (extensions != null && extensions.length > 0) {
+            this.fileFilter = FileChooserUtil.extensionFilter(description, extensions);
+        } else {
+            this.fileFilter = null;
+        }
+    }
+
+    /**
+     * 打开文件选择对话框
+     */
+    private void openFileChooser() {
+        SystemFileChooser fileChooser = FileChooserUtil.createOpenFileChooser(
+                "table.fileCellEditor.open",
+                TableUIConstants.SELECT_FILE_TEXT);
+
+        // 应用文件过滤器
+        if (fileFilter != null) {
+            fileChooser.setFileFilter(fileFilter);
+        }
+
+        // 使用最近的目录
+        if (lastDirectory != null && lastDirectory.exists()) {
+            fileChooser.setCurrentDirectory(lastDirectory);
+        }
+
+        // 如果已有文件路径，预选该文件
+        if (filePath != null && !filePath.isEmpty() && !TableUIConstants.SELECT_FILE_TEXT.equals(filePath)) {
+            File currentFile = new File(filePath);
+            if (currentFile.exists()) {
+                fileChooser.setSelectedFile(currentFile);
+            }
+        }
+
+        // 显示文件选择器
+        int result = fileChooser.showOpenDialog(parentComponent);
+        if (result == SystemFileChooser.APPROVE_OPTION) {
+            File selectedFile = fileChooser.getSelectedFile();
+            filePath = selectedFile.getAbsolutePath();
+            pathField.setText(filePath);
+            lastDirectory = selectedFile.getParentFile();
+
+            // 自动提交编辑
+            SwingUtilities.invokeLater(this::stopCellEditing);
+        }
+    }
+
+    @Override
+    public Component getTableCellEditorComponent(JTable table, Object value, boolean isSelected, int row, int column) {
+        filePath = value == null ? "" : value.toString();
+
+        TableUIConstants.styleCellEditorContainer(editorPanel, table, row);
+        TableUIConstants.styleContainedTextCellEditor(pathField, table, row);
+        browseButton.putClientProperty(BUTTON_BASE_BACKGROUND_PROPERTY, TableUIConstants.getRowBackground(table, row));
+        browseButton.setBackground(getButtonBaseBackground());
+
+        if (filePath.isEmpty() || TableUIConstants.SELECT_FILE_TEXT.equals(filePath)) {
+            pathField.setText("");
+            pathField.setToolTipText(null);
+        } else {
+            pathField.setText(filePath);
+            pathField.setToolTipText(filePath);
+            pathField.setForeground(table.getForeground());
+        }
+
+        return editorPanel;
+    }
+
+    private Color getButtonBaseBackground() {
+        Object background = browseButton.getClientProperty(BUTTON_BASE_BACKGROUND_PROPERTY);
+        return background instanceof Color color ? color : ModernColors.getTableBackgroundColor();
+    }
+
+    @Override
+    public Object getCellEditorValue() {
+        String value = pathField.getText();
+        return value.isEmpty() ? "" : value;
+    }
+
+    /**
+     * 获取选中的文件对象
+     */
+    public File getSelectedFile() {
+        if (filePath == null || filePath.isEmpty() || TableUIConstants.SELECT_FILE_TEXT.equals(filePath)) {
+            return null;
+        }
+        return new File(filePath);
+    }
+}

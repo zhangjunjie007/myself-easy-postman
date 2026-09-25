@@ -1,0 +1,28 @@
+[
+    {
+        "type": "group",
+        "id": "collection-cli-example",
+        "name": "EasyPostman CLI Example",
+        "description": "Standard EasyPostman workspace example for collection run.",
+        "children": [
+            {
+                "type": "group",
+                "id": "smoke",
+                "name": "Smoke",
+                "children": [
+                    {
+                        "type": "request",
+                        "data": {
+                            "id": "collection-get-example",
+                            "name": "GET example",
+                            "url": "{{baseUrl}}/get?source=collection-cli",
+                            "method": "GET",
+                            "bodyType": "none",
+                            "postscript": "var response = pm.response.json();\npm.test('status is 200', function () { pm.response.to.have.status(200); });\npm.test('query reached the server', function () { pm.expect(response.args.source[0]).to.equal('collection-cli'); });"
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+]

@@ -1,0 +1,233 @@
+package com.laker.postman.panel.performance.tree;
+
+import com.laker.postman.performance.core.config.CsvDataSetData;
+import com.laker.postman.performance.core.controller.ConditionData;
+import com.laker.postman.performance.core.controller.LoopData;
+import com.laker.postman.performance.core.controller.WhileData;
+import com.laker.postman.performance.core.extractor.ExtractorData;
+import com.laker.postman.performance.core.extractor.ExtractorType;
+import com.laker.postman.performance.core.extractor.ResponseField;
+import com.laker.postman.performance.core.model.SsePerformanceData;
+import com.laker.postman.performance.core.model.WebSocketPerformanceData;
+
+
+import cn.hutool.core.text.CharSequenceUtil;
+import com.laker.postman.util.I18nUtil;
+import com.laker.postman.util.MessageKeys;
+import lombok.experimental.UtilityClass;
+
+import java.util.StringJoiner;
+
+@UtilityClass
+public class PerformanceTreeNodeTitleFormatter {
+
+    public String csvDataSetTitle(CsvDataSetData data) {
+        String base = I18nUtil.getMessage(MessageKeys.PERFORMANCE_CSV_DATA_SET_NODE);
+        if (data == null || !data.hasRows()) {
+            return base;
+        }
+        String sourceName = CharSequenceUtil.blankToDefault(data.getSourceName(), base);
+        return base + " [" + sourceName + " | " + data.getRows().size() + "]";
+    }
+
+    public String sseReadTitle(SsePerformanceData data) {
+        if (data == null) {
+            return I18nUtil.getMessage(MessageKeys.PERFORMANCE_SSE_NODE_READ);
+        }
+        StringJoiner joiner = new StringJoiner(
+                " | ",
+                I18nUtil.getMessage(MessageKeys.PERFORMANCE_SSE_NODE_READ) + " [",
+                "]"
+        );
+        SsePerformanceData.CompletionMode mode = data.completionMode != null
+                ? data.completionMode
+                : SsePerformanceData.CompletionMode.SINGLE_MESSAGE;
+        joiner.add(sseCompletionModeLabel(mode));
+        switch (mode) {
+            case SINGLE_MESSAGE, UNTIL_MATCH -> joiner.add(formatDuration(data.firstMessageTimeoutMs));
+            case MESSAGE_COUNT -> {
+                joiner.add(String.valueOf(Math.max(1, data.targetMessageCount)));
+                joiner.add(formatDuration(data.firstMessageTimeoutMs));
+            }
+            case FIXED_DURATION, STREAM_CLOSED -> joiner.add(formatDuration(data.holdConnectionMs));
+        }
+        if (mode == SsePerformanceData.CompletionMode.UNTIL_MATCH
+                && CharSequenceUtil.isNotBlank(data.messageFilter)) {
+            joiner.add("contains=" + data.messageFilter.trim());
+        }
+        if (SsePerformanceData.usesEventNameFilter(mode)
+                && CharSequenceUtil.isNotBlank(data.eventNameFilter)) {
+            joiner.add("event=" + data.eventNameFilter.trim());
+        }
+        return joiner.toString();
+    }
+
+    public String loopTitle(LoopData data) {
+        LoopData normalizedData = data != null ? data : new LoopData();
+        normalizedData.normalize();
+        return I18nUtil.getMessage(MessageKeys.PERFORMANCE_LOOP_NODE)
+                + " [" + normalizedData.iterations + "x]";
+    }
+
+    public String simpleTitle() {
+        return I18nUtil.getMessage(MessageKeys.PERFORMANCE_SIMPLE_NODE);
+    }
+
+    public String conditionTitle(ConditionData data) {
+        String base = I18nUtil.getMessage(MessageKeys.PERFORMANCE_CONDITION_NODE);
+        if (data == null || CharSequenceUtil.isBlank(data.expression)) {
+            return base;
+        }
+        String expression = data.expression.trim();
+        if (expression.length() > 48) {
+            expression = expression.substring(0, 48) + "...";
+        }
+        return base + " [" + expression + "]";
+    }
+
+    public String whileTitle(WhileData data) {
+        String base = I18nUtil.getMessage(MessageKeys.PERFORMANCE_WHILE_NODE);
+        WhileData normalizedData = data != null ? data : new WhileData();
+        normalizedData.normalize();
+        StringJoiner joiner = new StringJoiner(" | ", base + " [", "]");
+        if (CharSequenceUtil.isNotBlank(normalizedData.expression)) {
+            joiner.add(ellipsis(normalizedData.expression.trim(), 48));
+        }
+        joiner.add(formatDuration(normalizedData.intervalMs));
+        joiner.add(normalizedData.maxIterations + "x");
+        return joiner.toString();
+    }
+
+    public String onceOnlyTitle() {
+        return I18nUtil.getMessage(MessageKeys.PERFORMANCE_ONCE_ONLY_NODE);
+    }
+
+    public String extractorTitle(ExtractorData data) {
+        if (data == null) {
+            return I18nUtil.getMessage(MessageKeys.PERFORMANCE_EXTRACTOR_NODE);
+        }
+        ExtractorType type = ExtractorType.fromStorageValue(data.type);
+        String variableName = CharSequenceUtil.blankToDefault(data.variableName, "?");
+        String expression = extractorExpressionTitle(type, data.expression);
+        StringJoiner joiner = new StringJoiner(
+                " | ",
+                I18nUtil.getMessage(MessageKeys.PERFORMANCE_EXTRACTOR_NODE) + " [",
+                "]"
+        );
+        joiner.add(I18nUtil.getMessage(type.getMessageKey()));
+        joiner.add(variableName.trim());
+        if (CharSequenceUtil.isNotBlank(expression)) {
+            joiner.add(expression.trim());
+        }
+        return joiner.toString();
+    }
+
+    private String extractorExpressionTitle(ExtractorType type, String expression) {
+        if (type == ExtractorType.RESPONSE_FIELD) {
+            return I18nUtil.getMessage(ResponseField.fromStorageValue(expression).getMessageKey());
+        }
+        return CharSequenceUtil.blankToDefault(expression, "");
+    }
+
+    public String webSocketSendTitle(WebSocketPerformanceData data) {
+        if (data == null) {
+            return I18nUtil.getMessage(MessageKeys.PERFORMANCE_WS_NODE_SEND);
+        }
+        WebSocketPerformanceData.SendMode sendMode = data.sendMode != null
+                ? data.sendMode
+                : WebSocketPerformanceData.SendMode.NONE;
+        String modeLabel = switch (sendMode) {
+            case NONE -> I18nUtil.getMessage(MessageKeys.PERFORMANCE_WS_SEND_NONE);
+            case REQUEST_BODY_ON_CONNECT -> I18nUtil.getMessage(MessageKeys.PERFORMANCE_WS_SEND_REQUEST_BODY);
+            case REQUEST_BODY_REPEAT -> I18nUtil.getMessage(MessageKeys.PERFORMANCE_WS_SEND_REQUEST_BODY_REPEAT);
+        };
+        StringJoiner joiner = new StringJoiner(
+                " | ",
+                I18nUtil.getMessage(MessageKeys.PERFORMANCE_WS_NODE_SEND) + " [",
+                "]"
+        );
+        joiner.add(modeLabel);
+        WebSocketPerformanceData.SendContentSource contentSource = data.sendContentSource != null
+                ? data.sendContentSource
+                : WebSocketPerformanceData.SendContentSource.REQUEST_BODY;
+        if (sendMode != WebSocketPerformanceData.SendMode.NONE
+                && contentSource == WebSocketPerformanceData.SendContentSource.CUSTOM_TEXT) {
+            joiner.add(I18nUtil.getMessage(MessageKeys.PERFORMANCE_WS_SEND_CONTENT_CUSTOM_TEXT));
+        }
+        if (sendMode == WebSocketPerformanceData.SendMode.REQUEST_BODY_REPEAT) {
+            joiner.add(I18nUtil.getMessage(
+                    MessageKeys.PERFORMANCE_WS_SEND_PER_LOOP_COUNT,
+                    Math.max(1, data.sendCount)
+            ));
+            joiner.add(formatDuration(Math.max(0, data.sendIntervalMs)));
+        }
+        return joiner.toString();
+    }
+
+    public String webSocketReadTitle(WebSocketPerformanceData data) {
+        if (data == null) {
+            return I18nUtil.getMessage(MessageKeys.PERFORMANCE_WS_NODE_READ);
+        }
+        StringJoiner joiner = new StringJoiner(
+                " | ",
+                I18nUtil.getMessage(MessageKeys.PERFORMANCE_WS_NODE_READ) + " [",
+                "]"
+        );
+        WebSocketPerformanceData.CompletionMode mode = data.completionMode != null
+                ? data.completionMode
+                : WebSocketPerformanceData.CompletionMode.SINGLE_MESSAGE;
+        joiner.add(webSocketCompletionModeLabel(mode));
+        switch (mode) {
+            case SINGLE_MESSAGE, UNTIL_MATCH -> joiner.add(formatDuration(data.firstMessageTimeoutMs));
+            case MESSAGE_COUNT -> {
+                joiner.add(String.valueOf(Math.max(1, data.targetMessageCount)));
+                joiner.add(formatDuration(data.firstMessageTimeoutMs));
+            }
+            case FIXED_DURATION -> joiner.add(formatDuration(data.holdConnectionMs));
+        }
+        if (WebSocketPerformanceData.usesMessageFilter(mode)
+                && CharSequenceUtil.isNotBlank(data.messageFilter)) {
+            joiner.add("contains=" + data.messageFilter.trim());
+        }
+        return joiner.toString();
+    }
+
+    public String formatDuration(int durationMs) {
+        if (durationMs >= 1000 && durationMs % 1000 == 0) {
+            return (durationMs / 1000) + "s";
+        }
+        return durationMs + "ms";
+    }
+
+    private String ellipsis(String text, int maxLength) {
+        if (text == null || text.length() <= maxLength) {
+            return text;
+        }
+        return text.substring(0, maxLength) + "...";
+    }
+
+    private String sseCompletionModeLabel(SsePerformanceData.CompletionMode mode) {
+        SsePerformanceData.CompletionMode normalizedMode = mode != null
+                ? mode
+                : SsePerformanceData.CompletionMode.SINGLE_MESSAGE;
+        return switch (normalizedMode) {
+            case SINGLE_MESSAGE -> I18nUtil.getMessage(MessageKeys.PERFORMANCE_SSE_COMPLETION_FIRST_MESSAGE);
+            case UNTIL_MATCH -> I18nUtil.getMessage(MessageKeys.PERFORMANCE_SSE_COMPLETION_MATCHED_MESSAGE);
+            case FIXED_DURATION -> I18nUtil.getMessage(MessageKeys.PERFORMANCE_SSE_COMPLETION_FIXED_DURATION);
+            case MESSAGE_COUNT -> I18nUtil.getMessage(MessageKeys.PERFORMANCE_SSE_COMPLETION_MESSAGE_COUNT);
+            case STREAM_CLOSED -> I18nUtil.getMessage(MessageKeys.PERFORMANCE_SSE_COMPLETION_STREAM_CLOSED);
+        };
+    }
+
+    private String webSocketCompletionModeLabel(WebSocketPerformanceData.CompletionMode mode) {
+        WebSocketPerformanceData.CompletionMode normalizedMode = mode != null
+                ? mode
+                : WebSocketPerformanceData.CompletionMode.SINGLE_MESSAGE;
+        return switch (normalizedMode) {
+            case SINGLE_MESSAGE -> I18nUtil.getMessage(MessageKeys.PERFORMANCE_WS_COMPLETION_FIRST_MESSAGE);
+            case UNTIL_MATCH -> I18nUtil.getMessage(MessageKeys.PERFORMANCE_WS_COMPLETION_MATCHED_MESSAGE);
+            case FIXED_DURATION -> I18nUtil.getMessage(MessageKeys.PERFORMANCE_WS_COMPLETION_FIXED_DURATION);
+            case MESSAGE_COUNT -> I18nUtil.getMessage(MessageKeys.PERFORMANCE_WS_COMPLETION_MESSAGE_COUNT);
+        };
+    }
+}

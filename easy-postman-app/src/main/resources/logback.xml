@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- 便携版写入应用根目录/logs，安装版写入用户主目录/EasyPostman/logs -->
+    <define name="LOG_HOME" class="com.laker.postman.logging.LogHomePropertyDefiner"/>
+    <!-- 支持通过系统属性覆盖日志级别，默认为 INFO -->
+    <property name="LOG_LEVEL" value="${LOG_LEVEL:-INFO}"/>
+    <!-- MCP 模式会在日志初始化前将这些级别默认设为 OFF；可用 -D 参数显式开启诊断。 -->
+    <property name="CONSOLE_LOG_LEVEL" value="${CONSOLE_LOG_LEVEL:-INFO}"/>
+    <property name="HTTP_LOG_LEVEL" value="${HTTP_LOG_LEVEL:-DEBUG}"/>
+
+    <!-- 控制台日志统一写 stderr，避免污染 CLI/MCP 在 stdout 上的结构化输出。 -->
+    <appender name="console" class="ch.qos.logback.core.ConsoleAppender">
+        <target>System.err</target>
+        <!-- 立即刷新输出，确保实时显示 -->
+        <immediateFlush>true</immediateFlush>
+        <!-- 日志输出格式编码器 -->
+        <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
+            <!-- 输出格式：时间(HH:mm:ss.SSS) [线程名] 日志级别 类名:行号 - 消息内容 -->
+            <!-- 使用 ANSI 颜色代码的日志格式 -->
+            <pattern>%cyan(%d{HH:mm:ss.SSS}) %white([%thread]) %highlight(%-5level) %magenta(%logger{36}) %white(:%line) %msg%n
+            </pattern>
+        </encoder>
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>${CONSOLE_LOG_LEVEL}</level>
+        </filter>
+    </appender>
+
+    <!-- 文件输出配置 - 记录所有级别的日志到文件 -->
+    <appender name="allFile" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <!-- 当前活动的日志文件路径 -->
+        <file>${LOG_HOME}/all.log</file>
+        <!-- 日志文件滚动策略：基于文件大小和时间进行滚动 -->
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <!-- 归档文件命名模式：包含日期和序号 -->
+            <fileNamePattern>${LOG_HOME}/all.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <!-- 单个日志文件最大大小：10MB -->
+            <maxFileSize>10MB</maxFileSize>
+            <!-- 保留历史文件的最大天数：15天 -->
+            <maxHistory>15</maxHistory>
+            <!-- 所有归档文件的总大小上限：200MB -->
+            <totalSizeCap>200MB</totalSizeCap>
+            <!-- 应用启动时清理超出保留策略的历史文件 -->
+            <!-- 作用：删除超过 maxHistory(15天) 或 totalSizeCap(200MB) 限制的文件 -->
+            <!-- 好处：防止磁盘空间被旧日志文件耗尽，保持日志目录整洁 -->
+            <cleanHistoryOnStart>true</cleanHistoryOnStart>
+        </rollingPolicy>
+        <!-- 日志输出格式编码器 -->
+        <encoder>
+            <!-- 输出格式：完整日期时间 [线程名] 日志级别 类名:行号 - 消息内容 -->
+            <pattern>%date{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} :%line - %msg%n</pattern>
+            <!-- 设置字符编码 -->
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- 错误日志文件输出配置 - 专门记录 ERROR 级别的日志 -->
+    <appender name="errorFile" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <!-- 错误日志文件路径 -->
+        <file>${LOG_HOME}/error.log</file>
+        <!-- 错误日志文件滚动策略：基于文件大小和时间进行滚动 -->
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <!-- 错误日志归档文件命名模式 -->
+            <fileNamePattern>${LOG_HOME}/error.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <!-- 单个错误日志文件最大大小：10MB -->
+            <maxFileSize>10MB</maxFileSize>
+            <!-- 保留错误日志历史文件的最大天数：30天 -->
+            <maxHistory>30</maxHistory>
+            <!-- 所有错误日志归档文件的总大小上限：100MB -->
+            <totalSizeCap>100MB</totalSizeCap>
+        </rollingPolicy>
+        <!-- 错误日志输出格式编码器 -->
+        <encoder>
+            <!-- 输出格式：完整日期时间 [线程名] 日志级别 类名:行号 - 消息内容 -->
+            <pattern>%date{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} :%line - %msg%n</pattern>
+        </encoder>
+        <!-- 日志级别精确过滤器：只接受 ERROR 级别的日志，拒绝其他级别 -->
+        <filter class="ch.qos.logback.classic.filter.LevelFilter">
+            <!-- 目标日志级别：ERROR -->
+            <level>ERROR</level>
+            <!-- 匹配时的行为：接受 -->
+            <onMatch>ACCEPT</onMatch>
+            <!-- 不匹配时的行为：拒绝 -->
+            <onMismatch>DENY</onMismatch>
+        </filter>
+    </appender>
+
+    <!-- 异步日志 appender - 提升日志写入性能，避免阻塞主线程 -->
+    <appender name="asyncAllFile" class="ch.qos.logback.classic.AsyncAppender">
+        <!-- 引用上面定义的 allFile appender -->
+        <appender-ref ref="allFile"/>
+        <!-- 增大队列以提高吞吐量 -->
+        <queueSize>512</queueSize>
+        <!-- 调整丢弃阈值，保留更多重要日志 -->
+        <discardingThreshold>0</discardingThreshold>
+        <!-- 应用程序关闭时等待日志写入完成的最大时间（毫秒） -->
+        <maxFlushTime>5000</maxFlushTime>
+        <!-- 阻塞时不丢失日志 -->
+        <neverBlock>false</neverBlock>
+        <!-- 包含调用者信息（性能影响，生产环境可关闭） -->
+        <includeCallerData>false</includeCallerData>
+    </appender>
+
+    <!-- HTTP 请求日志 appender - 专门记录网络请求 -->
+    <appender name="httpFile" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_HOME}/http.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_HOME}/http.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>10MB</maxFileSize>
+            <maxHistory>7</maxHistory>
+            <totalSizeCap>50MB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%date{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- 特定包的日志配置 - HTTP 客户端日志 -->
+    <!-- 专门配置 okhttp3 网络库的日志记录行为 -->
+    <logger name="okhttp3" level="${HTTP_LOG_LEVEL}" additivity="false">
+        <!-- name: 指定 logger 名称，匹配 okhttp3.* 包下的所有类 -->
+        <!-- level: 设置为 DEBUG 级别，记录详细的HTTP请求/响应信息 -->
+        <!-- additivity: 设为 false，阻止日志向父 logger 传播，避免重复记录 -->
+
+        <!-- 输出到专门的 HTTP 日志文件 -->
+        <appender-ref ref="httpFile"/>
+        <!-- 同时输出到控制台，便于开发时调试 -->
+        <appender-ref ref="console"/>
+
+        <!-- 作用：将所有 HTTP 请求/响应日志隔离到独立文件，便于网络问题调试 -->
+        <!-- 好处：避免 HTTP 日志污染主日志文件，提供专门的网络调试视图 -->
+    </logger>
+
+    <!-- 应用程序特定日志配置 -->
+    <!-- 配置项目自身代码的日志记录策略 -->
+    <logger name="com.laker.postman" level="${LOG_LEVEL}" additivity="false">
+        <!-- name: 匹配项目包名 com.laker.postman.* 下的所有类 -->
+        <!-- level: 默认 INFO，可通过 -DLOG_LEVEL=DEBUG 临时开启应用诊断日志 -->
+        <!-- additivity: false 阻止向根 logger 传播，避免在根 logger 中重复记录 -->
+
+        <!-- 输出到控制台，开发时实时查看 -->
+        <appender-ref ref="console"/>
+        <!-- 输出到异步全量日志文件，完整记录应用行为 -->
+        <appender-ref ref="asyncAllFile"/>
+        <!-- 输出到错误日志文件，专门收集应用错误 -->
+        <appender-ref ref="errorFile"/>
+
+        <!-- 作用：为应用核心代码提供完整的日志记录覆盖 -->
+        <!-- 好处：确保应用逻辑的所有日志都被正确分类和存储 -->
+    </logger>
+
+    <!-- 根日志配置 - 应用于所有未明确配置的 logger -->
+    <!-- 这是日志系统的默认配置，处理所有未被特定 logger 捕获的日志 -->
+    <root level="${LOG_LEVEL}">
+        <!-- level: 使用环境变量 LOG_LEVEL，默认为 INFO，可动态调整 -->
+        <!-- 作用范围：所有第三方库、框架、未配置的包的日志 -->
+
+        <!-- 绑定控制台输出 appender -->
+        <!-- 作用：所有日志都在控制台显示，便于开发调试 -->
+        <appender-ref ref="console"/>
+
+        <!-- 绑定异步文件输出 appender（包含所有日志） -->
+        <!-- 作用：完整记录系统运行状态，用于问题追溯和分析 -->
+        <appender-ref ref="asyncAllFile"/>
+
+        <!-- 绑定错误日志文件输出 appender -->
+        <!-- 作用：集中收集系统中所有ERROR级别日志，便于快速定位问题 -->
+        <appender-ref ref="errorFile"/>
+
+        <!-- 整体作用：为整个应用提供兜底的日志记录机制 -->
+        <!-- 覆盖范围：Spring框架、数据库连接池、JSON解析库等第三方组件 -->
+    </root>
+</configuration>

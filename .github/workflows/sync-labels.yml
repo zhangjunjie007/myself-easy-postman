@@ -1,0 +1,78 @@
+# 工作流名称：同步标签
+name: Sync Labels
+
+# 触发条件
+on:
+  # 当推送到 master 分支，且 .github/labels.json 文件发生变化时触发
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/labels.json'
+  # 允许手动触发工作流
+  workflow_dispatch:
+
+jobs:
+  sync-labels:
+    # 运行环境：使用最新版本的 Ubuntu
+    runs-on: ubuntu-latest
+    # 权限设置：允许写入 issues（包括标签管理）
+    permissions:
+      issues: write
+
+    steps:
+      # 第一步：检出代码仓库
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # 第二步：同步标签配置到 GitHub 仓库
+      - name: Sync labels
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            const labels = JSON.parse(fs.readFileSync('.github/labels.json', 'utf8'));
+            const names = new Set();
+
+            for (const label of labels) {
+              const key = label.name.toLowerCase();
+              if (names.has(key)) {
+                core.setFailed(`Duplicate label name: ${label.name}`);
+                return;
+              }
+              names.add(key);
+            }
+
+            const existing = await github.paginate(github.rest.issues.listLabelsForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100
+            });
+            const existingByName = new Map(
+              existing.map(label => [label.name.toLowerCase(), label])
+            );
+
+            for (const label of labels) {
+              const current = existingByName.get(label.name.toLowerCase());
+              if (!current) {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ...label
+                });
+                continue;
+              }
+
+              if (current.color.toLowerCase() !== label.color.toLowerCase()
+                  || (current.description || '') !== label.description
+                  || current.name !== label.name) {
+                await github.rest.issues.updateLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: current.name,
+                  new_name: label.name,
+                  color: label.color,
+                  description: label.description
+                });
+              }
+            }

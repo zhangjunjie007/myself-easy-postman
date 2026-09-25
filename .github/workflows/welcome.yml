@@ -1,0 +1,92 @@
+name: Welcome New Contributors
+
+on:
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened]
+
+jobs:
+  welcome:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Welcome new contributor
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const isIssue = context.payload.issue !== undefined;
+            
+            if (isIssue) {
+              // Check if this is the user's first issue
+              const issues = await github.rest.issues.listForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                creator: context.payload.sender.login,
+                state: 'all'
+              });
+              
+              const isFirstIssue = issues.data.length === 1;
+              
+              if (isFirstIssue) {
+                const issueComment = `👋 你好 @${context.payload.sender.login}！感谢你提交第一个 Issue！
+                
+              Hi @${context.payload.sender.login}! Thank you for submitting your first issue!
+              
+              我们会尽快查看并回复你。在等待的过程中，你可以：
+              We'll review and respond as soon as possible. While waiting, you can:
+              
+              - 📖 查看 [文档](https://github.com/lakernote/easy-postman#readme) | Check the [documentation](https://github.com/lakernote/easy-postman#readme)
+              - 💬 加入 [讨论区](https://github.com/lakernote/easy-postman/discussions) | Join the [Discussions](https://github.com/lakernote/easy-postman/discussions)
+              - ⭐ 给项目点个 Star！| Give the project a Star!
+              
+              如果你愿意帮助解决这个问题，欢迎提交 PR！
+              If you'd like to help fix this issue, PRs are welcome!
+              `;
+                
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.payload.issue.number,
+                  body: issueComment
+                });
+              }
+            } else {
+              // Check if this is the user's first PR
+              const pulls = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'all',
+                creator: context.payload.sender.login
+              });
+              
+              const isFirstPR = pulls.data.length === 1;
+              
+              if (isFirstPR) {
+                const prComment = `🎉 感谢你的第一个 Pull Request @${context.payload.sender.login}！
+                
+              🎉 Thank you for your first Pull Request @${context.payload.sender.login}!
+              
+              我们的维护者会尽快审查你的代码。在等待的过程中，请确保：
+              Our maintainers will review your code soon. While waiting, please ensure:
+              
+              - ✅ 代码可以成功编译 | Code compiles successfully
+              - ✅ 所有测试通过 | All tests pass
+              - ✅ 遵循 [贡献指南](https://github.com/lakernote/easy-postman/blob/master/.github/CONTRIBUTING.md) | Follow the [Contributing Guide](https://github.com/lakernote/easy-postman/blob/master/.github/CONTRIBUTING.md)
+              - ✅ PR 描述清晰完整 | PR description is clear and complete
+              
+              再次感谢你的贡献！🙏
+              Thank you again for your contribution! 🙏
+              `;
+                
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.payload.pull_request.number,
+                  body: prComment
+                });
+              }
+            }
