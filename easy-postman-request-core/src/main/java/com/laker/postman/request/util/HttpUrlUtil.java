@@ -17,6 +17,38 @@ import java.util.Set;
 @UtilityClass
 public class HttpUrlUtil {
 
+    /**
+     * Appends a slash-prefixed request path to the environment's business base URL.
+     * Absolute and host-only URLs remain unchanged. Base paths are retained, and query/fragment
+     * components belong to the request path. A relative path requires a valid HTTP(S) base URL.
+     *
+     * @param url resolved request URL, including any query string
+     * @param baseUrl business address, independent of the authentication endpoint
+     * @return the absolute URL, or the original URL when it is not a relative path
+     * @throws IllegalArgumentException if a relative path has no valid business base URL
+     */
+    public static String resolveAgainstBaseUrl(String url, String baseUrl) {
+        if (url == null || !url.startsWith("/")) {
+            return url;
+        }
+        if (baseUrl == null || baseUrl.isBlank()) {
+            throw new IllegalArgumentException("相对路径请求需要在当前环境配置 baseUrl（业务接口地址）");
+        }
+        String base = normalizeIpv6Url(baseUrl.trim());
+        URI uri;
+        try {
+            uri = URI.create(base);
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalArgumentException("baseUrl 必须是完整的 HTTP/HTTPS 业务接口地址", exception);
+        }
+        if (!("http".equalsIgnoreCase(uri.getScheme()) || "https".equalsIgnoreCase(uri.getScheme()))
+                || uri.getHost() == null || uri.getUserInfo() != null
+                || uri.getRawQuery() != null || uri.getRawFragment() != null) {
+            throw new IllegalArgumentException("baseUrl 必须是完整的 HTTP/HTTPS 地址，不能包含认证信息、查询参数或片段");
+        }
+        return base.replaceAll("/+$", "") + "/" + url.replaceFirst("^/+", "");
+    }
+
     public static String buildEncodedUrl(String rawUrl, List<HttpParam> paramsList) {
         if (rawUrl == null) {
             return "";

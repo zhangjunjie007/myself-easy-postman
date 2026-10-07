@@ -5,6 +5,7 @@ import com.laker.postman.http.runtime.model.PreparedRequest;
 import com.laker.postman.model.Environment;
 import com.laker.postman.model.PlmAuthConfig;
 import com.laker.postman.request.model.HttpHeader;
+import com.laker.postman.util.JsonUtil;
 
 import java.io.IOException;
 import java.net.URI;
@@ -25,6 +26,7 @@ import java.util.UUID;
 /** PLM token login for the selected environment; credentials are configured there, tokens stay in memory. */
 public final class PlmEnvironmentAuthService {
     private static Environment authenticatedEnvironment;
+    private static String authenticatedConfiguration;
     private static String token;
     private static Instant expiresAt;
 
@@ -126,30 +128,45 @@ public final class PlmEnvironmentAuthService {
         request.environmentAuthEnvironment = environment;
     }
 
-    /** On one 401, discard the cached token and replace this request's header before a single resend. */
+    /**
+     * Refreshes a rejected token before the caller's single resend. If another request already
+     * refreshed it, reuse that newer token instead of issuing another login.
+     */
     public static synchronized boolean retryAfterUnauthorized(PreparedRequest request) {
         Environment environment = EnvironmentService.getActiveEnvironment();
         if (request == null || request.environmentAuthEnvironment != environment || environment == null
                 || environment.getAuth() == null) {
             return false;
         }
-        clear();
         PlmAuthConfig auth = environment.getAuth();
+        if (token != null && request.headersList != null && request.headersList.stream().anyMatch(header ->
+                header != null && auth.getHeaderName().equalsIgnoreCase(header.getKey())
+                        && (auth.getHeaderPrefix() + token).equals(header.getValue()))) {
+            clear();
+        }
         setHeader(request, auth.getHeaderName(), auth.getHeaderPrefix() + getToken(environment));
         return true;
     }
 
-    /** Clears the current token when an environment changes or its configuration is edited. */
+    /** Discards the in-memory credential on workspace/environment changes or rejected authorization. */
     public static synchronized void clear() {
         token = null;
         expiresAt = null;
         authenticatedEnvironment = null;
+        authenticatedConfiguration = null;
     }
 
-    /** Reports whether the active environment has an unexpired in-memory token, without exposing it. */
+    /** Reports a valid token for the active environment's current login settings without exposing it. */
     public static synchronized boolean isAuthenticated() {
-        return token != null && authenticatedEnvironment == EnvironmentService.getActiveEnvironment()
-                && (expiresAt == null || Instant.now().isBefore(expiresAt));
+        Environment environment = EnvironmentService.getActiveEnvironment();
+        if (environment == null || environment.getAuth() == null) {
+            return false;
+        }
+        try {
+            return hasValidToken(environment, tokenConfiguration(environment));
+        } catch (RuntimeException exception) {
+            return false;
+        }
     }
 
     /** Replaces stale request-level Authorization with the current environment credential. */
@@ -162,15 +179,18 @@ public final class PlmEnvironmentAuthService {
         request.headersList.add(new HttpHeader(true, name, value));
     }
 
-    /** Reuses one valid token per environment; network and parser errors become safe UI messages. */
+    /**
+     * Reuses the selected environment's token until expiry or a login-setting change.
+     * Called under the service monitor so concurrent sends issue only one login; errors hide secrets.
+     */
     private static String getToken(Environment environment) {
-        if (token != null && authenticatedEnvironment == environment
-                && (expiresAt == null || Instant.now().isBefore(expiresAt.minusSeconds(30)))) {
-            return token;
-        }
-        clear();
         try {
-            return authenticate(environment);
+            String configuration = tokenConfiguration(environment);
+            if (hasValidToken(environment, configuration)) {
+                return token;
+            }
+            clear();
+            return authenticate(environment, configuration);
         } catch (IOException exception) {
             throw new IllegalStateException("PLM 认证请求失败，请检查服务地址和网络连接");
         } catch (InterruptedException exception) {
@@ -185,8 +205,30 @@ public final class PlmEnvironmentAuthService {
         }
     }
 
-    /** Performs the chosen PLM protocol and publishes a token only after JSON validation succeeds. */
-    private static String authenticate(Environment environment) throws IOException, InterruptedException {
+    /** Tests the cache against a login snapshot; unrelated environment variables do not invalidate it. */
+    private static boolean hasValidToken(Environment environment, String configuration) {
+        return token != null && authenticatedEnvironment == environment
+                && configuration.equals(authenticatedConfiguration)
+                && (expiresAt == null || Instant.now().isBefore(expiresAt));
+    }
+
+    /**
+     * Snapshots login settings and resolved auth URL/headers to detect in-place edits.
+     * Excludes ordinary business/script variables; the snapshot contains credentials and stays in memory.
+     * @return a private comparison value; never persist or log it
+     */
+    private static String tokenConfiguration(Environment environment) {
+        PlmAuthConfig auth = environment.getAuth();
+        Map<String, String> headers = new java.util.LinkedHashMap<>();
+        if (auth.getHeaders() != null && "pin-token".equals(auth.getType())) {
+            auth.getHeaders().forEach((name, value) -> headers.put(name, resolve(environment, value)));
+        }
+        return JsonUtil.toJsonStr(Map.of("auth", auth, "url", resolve(environment, auth.getTokenUrl()),
+                "headers", headers));
+    }
+
+    /** Performs PLM login and publishes only a valid token, bound to the pre-login configuration snapshot. */
+    private static String authenticate(Environment environment, String configuration) throws IOException, InterruptedException {
         PlmAuthConfig auth = environment.getAuth();
         String url = resolve(environment, auth.getTokenUrl());
         HttpRequest.Builder builder = HttpRequest.newBuilder()
@@ -263,13 +305,44 @@ public final class PlmEnvironmentAuthService {
             if (lifetime != null && lifetime <= 0) {
                 throw new IllegalArgumentException();
             }
-            expiresAt = lifetime == null ? null : Instant.now().plusSeconds(lifetime);
+            Instant expiry = tokenExpiry(accessToken, lifetime);
+            if (expiry != null && !Instant.now().isBefore(expiry)) {
+                throw new IllegalArgumentException();
+            }
+            expiresAt = expiry;
             token = accessToken;
             authenticatedEnvironment = environment;
+            authenticatedConfiguration = configuration;
             return token;
         } catch (RuntimeException exception) {
             throw new IllegalStateException("PLM Token 响应缺少有效的 " + auth.getTokenJsonPath());
         }
+    }
+
+    /**
+     * Uses expires_in and an optional JWT exp, taking the earlier expiry. JWT decoding is only
+     * a cache deadline hint, not signature verification; opaque tokens without expiry rely on 401.
+     * @param lifetime provider lifetime in seconds, or null when omitted
+     * @return the earliest known expiry, or null when neither deadline is supplied
+     */
+    private static Instant tokenExpiry(String accessToken, Long lifetime) {
+        Instant expiry = lifetime == null ? null : Instant.now().plusSeconds(lifetime);
+        String[] parts = accessToken.split("\\.");
+        if (parts.length == 3) {
+            try {
+                Long exp = JSONUtil.parseObj(new String(Base64.getUrlDecoder().decode(parts[1]),
+                        StandardCharsets.UTF_8)).getLong("exp");
+                if (exp != null) {
+                    Instant jwtExpiry = Instant.ofEpochSecond(exp);
+                    if (expiry == null || jwtExpiry.isBefore(expiry)) {
+                        expiry = jwtExpiry;
+                    }
+                }
+            } catch (RuntimeException ignored) {
+                // A provider's dotted opaque token is still usable; expires_in/401 remains authoritative.
+            }
+        }
+        return expiry;
     }
 
     /** Emits one UTF-8 multipart text field with required CRLF separators. */

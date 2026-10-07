@@ -25,12 +25,18 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Base64;
 import java.util.EnumSet;
+import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * Coordinates one GUI process per data directory.
@@ -46,14 +52,21 @@ public final class SingleInstanceCoordinator implements AutoCloseable {
     private static final String METADATA_FILE_NAME = "gui-instance.properties";
     private static final String PROTOCOL_VERSION = "1";
     private static final String COMMAND_ACTIVATE = "ACTIVATE";
+    private static final String COMMAND_SHUTDOWN = "SHUTDOWN";
     private static final String RESPONSE_OK = "OK";
     private static final String RESPONSE_DENIED = "DENIED";
     private static final String RESPONSE_ERROR = "ERROR";
     private static final Duration COORDINATION_TIMEOUT = Duration.ofMillis(1800);
+    private static final Duration TAKEOVER_TIMEOUT = Duration.ofSeconds(12);
+    private static final Duration GRACEFUL_EXIT_TIMEOUT = Duration.ofSeconds(3);
     private static final int CONNECT_TIMEOUT_MILLIS = 300;
     private static final int SOCKET_READ_TIMEOUT_MILLIS = 500;
     private static final int RETRY_DELAY_MILLIS = 75;
     private static final int TOKEN_BYTES = 32;
+    private static final Pattern LEGACY_GUI_COMMAND = Pattern.compile(
+            "(?:^|\\s)\\\"?com\\.laker\\.postman\\.App\\\"?\\s*$|"
+                    + "(?i)(?:^|\\s)-jar\\s+(?:\\\"[^\\\"]*easy[-_]?postman[^\\\"\\\\/]*\\.jar\\\""
+                    + "|[^\\s]*easy[-_]?postman[^\\s\\\\/]*\\.jar)\\s*$");
     private static final Set<PosixFilePermission> OWNER_DIRECTORY_PERMISSIONS = EnumSet.of(
             PosixFilePermission.OWNER_READ,
             PosixFilePermission.OWNER_WRITE,
@@ -70,21 +83,25 @@ public final class SingleInstanceCoordinator implements AutoCloseable {
     private final Path metadataPath;
     private final String token;
     private final Runnable activationHandler;
+    private final Runnable shutdownHandler;
     private final AtomicBoolean closed = new AtomicBoolean();
     private Thread listenerThread;
 
+    /** Retains OS lock ownership and host callbacks until this coordinator is closed. */
     private SingleInstanceCoordinator(FileChannel lockChannel,
                                       FileLock instanceLock,
                                       ServerSocket activationServer,
                                       Path metadataPath,
                                       String token,
-                                      Runnable activationHandler) {
+                                      Runnable activationHandler,
+                                      Runnable shutdownHandler) {
         this.lockChannel = lockChannel;
         this.instanceLock = instanceLock;
         this.activationServer = activationServer;
         this.metadataPath = metadataPath;
         this.token = token;
         this.activationHandler = activationHandler;
+        this.shutdownHandler = shutdownHandler;
     }
 
     /**
@@ -120,6 +137,171 @@ public final class SingleInstanceCoordinator implements AutoCloseable {
         }
     }
 
+    /**
+     * Makes this launch the GUI owner of {@code dataRoot}, replacing its previous owner.
+     * The old GUI has three seconds to save and exit before its process tree is terminated.
+     * PID/start-time checks exclude reused PIDs; unverifiable owners are never terminated.
+     * Callbacks must enqueue their UI work and return promptly. No other data directory is scanned.
+     *
+     * @return the new primary owner, or unreachable if its lock cannot safely be reclaimed
+     */
+    public static LaunchResult acquireOrReplace(Path dataRoot, Runnable activationHandler,
+                                                Runnable shutdownHandler) throws IOException {
+        Objects.requireNonNull(dataRoot, "dataRoot");
+        Objects.requireNonNull(activationHandler, "activationHandler");
+        Objects.requireNonNull(shutdownHandler, "shutdownHandler");
+        Path runtimeDirectory = dataRoot.toAbsolutePath().normalize().resolve(RUNTIME_DIRECTORY_NAME);
+        Files.createDirectories(runtimeDirectory);
+        restrictPermissions(runtimeDirectory, OWNER_DIRECTORY_PERMISSIONS);
+        Path metadataPath = runtimeDirectory.resolve(METADATA_FILE_NAME);
+        long deadlineNanos = System.nanoTime() + TAKEOVER_TIMEOUT.toNanos();
+
+        // Serialize replacement launches so two newcomers cannot terminate the same owner concurrently.
+        LockOwnership takeover = null;
+        while (takeover == null) {
+            takeover = tryAcquireOwnership(runtimeDirectory.resolve("gui-takeover.lock"));
+            if (takeover == null && (System.nanoTime() >= deadlineNanos || !pauseBeforeRetry())) {
+                return LaunchResult.existingInstanceUnreachable();
+            }
+        }
+        try (FileChannel channel = takeover.channel(); FileLock lock = takeover.lock()) {
+            while (System.nanoTime() < deadlineNanos) {
+                LockOwnership ownership = tryAcquireOwnership(runtimeDirectory.resolve(LOCK_FILE_NAME));
+                if (ownership != null) {
+                    return startPrimary(ownership, metadataPath, activationHandler, shutdownHandler);
+                }
+                InstanceMetadata metadata = readMetadata(metadataPath);
+                ProcessHandle owner = verifiedOwner(metadata);
+                if (owner != null) {
+                    // Capture children before shutdown, since parent exit can orphan them on Windows.
+                    List<ProcessHandle> descendants = owner.descendants()
+                            .filter(process -> process.pid() != ProcessHandle.current().pid()).toList();
+                    log.info("Replacing existing EasyPostman GUI process: pid={}", owner.pid());
+                    if (sendCommand(metadata, COMMAND_SHUTDOWN)) {
+                        waitForExit(List.of(owner), GRACEFUL_EXIT_TIMEOUT);
+                    }
+                    if (Thread.currentThread().isInterrupted()) {
+                        return LaunchResult.existingInstanceUnreachable();
+                    }
+                    if (owner.isAlive()) {
+                        if (verifiedOwner(metadata) == null) {
+                            throw new IOException("GUI process identity changed during replacement");
+                        }
+                        descendants = Stream.concat(descendants.stream(), owner.descendants())
+                                .filter(process -> process.pid() != ProcessHandle.current().pid()).distinct().toList();
+                        log.warn("Force-terminating previous GUI process tree: pid={}", owner.pid());
+                        terminate(owner);
+                    }
+                    for (ProcessHandle descendant : descendants) {
+                        terminate(descendant);
+                    }
+                    if (!waitForExit(descendants, Duration.ofSeconds(2))) {
+                        throw new IOException("Previous GUI child processes did not terminate");
+                    }
+                }
+                if (!pauseBeforeRetry()) {
+                    break;
+                }
+            }
+        }
+        return LaunchResult.existingInstanceUnreachable();
+    }
+
+    /** Returns only the recorded live owner; legacy metadata additionally requires a GUI command line. */
+    private static ProcessHandle verifiedOwner(InstanceMetadata metadata) {
+        if (metadata == null || metadata.pid() <= 0 || metadata.pid() == ProcessHandle.current().pid()) {
+            return null;
+        }
+        ProcessHandle process = ProcessHandle.of(metadata.pid()).orElse(null);
+        if (process == null || !process.isAlive()) {
+            return null;
+        }
+        ProcessHandle.Info info = process.info();
+        Instant startedAt = info.startInstant().orElse(null);
+        if (startedAt == null) {
+            return null;
+        }
+        if (!metadata.startedAt().isBlank()) {
+            return metadata.startedAt().equals(startedAt.toString())
+                    && metadata.command().equals(info.command().orElse("")) ? process : null;
+        }
+        // Old releases recorded only PID. A process started after that file cannot be its owner.
+        return startedAt.toEpochMilli() <= metadata.modifiedAtMillis() && isLegacyGuiProcess(process)
+                ? process : null;
+    }
+
+    /** Recognizes an old GUI entry point, excluding the app's CLI commands and generic Java services. */
+    private static boolean isLegacyGuiProcess(ProcessHandle process) {
+        ProcessHandle.Info info = process.info();
+        String[] arguments = info.arguments().orElse(new String[0]);
+        for (int i = 0; i < arguments.length; i++) {
+            String argument = arguments[i].replace('\\', '/');
+            String name = argument.substring(argument.lastIndexOf('/') + 1).toLowerCase(Locale.ROOT)
+                    .replace("-", "").replace("_", "");
+            if ("com.laker.postman.App".equals(arguments[i])
+                    || (i > 0 && "-jar".equals(arguments[i - 1])
+                    && name.startsWith("easypostman") && name.endsWith(".jar"))) {
+                return i == arguments.length - 1;
+            }
+        }
+        String command = info.command().orElse("").toLowerCase(Locale.ROOT).replace("-", "");
+        String commandLine = info.commandLine().orElseGet(() -> readWindowsCommandLine(process.pid()));
+        if (LEGACY_GUI_COMMAND.matcher(commandLine).find()) {
+            return true;
+        }
+        return command.endsWith("easypostman.exe")
+                && (commandLine.trim().equalsIgnoreCase(info.command().orElse(""))
+                || commandLine.trim().equalsIgnoreCase('"' + info.command().orElse("") + '"'));
+    }
+
+    /**
+     * Java 17 on Windows omits arguments/commandLine. Query only the recorded legacy PID via
+     * Windows CIM, with a bounded wait; failure leaves the process untouched.
+     */
+    private static String readWindowsCommandLine(long pid) {
+        if (!System.getProperty("os.name", "").startsWith("Windows")) {
+            return "";
+        }
+        Process query = null;
+        try {
+            query = new ProcessBuilder("powershell.exe", "-NoProfile", "-NonInteractive",
+                    "-WindowStyle", "Hidden", "-Command",
+                    "(Get-CimInstance Win32_Process -Filter 'ProcessId = " + pid + "').CommandLine")
+                    .redirectErrorStream(true).start();
+            if (query.waitFor(3, TimeUnit.SECONDS) && query.exitValue() == 0) {
+                return new String(query.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+            }
+        } catch (IOException exception) {
+            log.debug("Unable to identify legacy GUI command line: pid={}", pid, exception);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        } finally {
+            if (query != null && query.isAlive()) {
+                query.destroyForcibly();
+            }
+        }
+        return "";
+    }
+
+    /** Terminates a verified owner or its captured descendant; never terminates this launcher. */
+    private static void terminate(ProcessHandle process) throws IOException {
+        if (process.pid() != ProcessHandle.current().pid() && process.isAlive()
+                && !process.destroyForcibly() && process.isAlive()) {
+            throw new IOException("Unable to terminate previous GUI process: " + process.pid());
+        }
+    }
+
+    /** Waits within a single shared deadline for captured processes; preserves interruption. */
+    private static boolean waitForExit(List<ProcessHandle> processes, Duration timeout) {
+        long deadlineNanos = System.nanoTime() + timeout.toNanos();
+        while (processes.stream().anyMatch(ProcessHandle::isAlive)) {
+            if (System.nanoTime() >= deadlineNanos || !pauseBeforeRetry()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private static LockOwnership tryAcquireOwnership(Path lockPath) throws IOException {
         FileChannel channel = FileChannel.open(
                 lockPath,
@@ -143,9 +325,18 @@ public final class SingleInstanceCoordinator implements AutoCloseable {
         }
     }
 
+    /** Starts the legacy activation-only owner without enabling remote shutdown. */
     private static LaunchResult startPrimary(LockOwnership ownership,
                                              Path metadataPath,
                                              Runnable activationHandler) throws IOException {
+        return startPrimary(ownership, metadataPath, activationHandler, null);
+    }
+
+    /** Starts the lock owner; the optional shutdown callback must return without waiting for the UI. */
+    private static LaunchResult startPrimary(LockOwnership ownership,
+                                             Path metadataPath,
+                                             Runnable activationHandler,
+                                             Runnable shutdownHandler) throws IOException {
         ServerSocket activationServer = null;
         try {
             activationServer = new ServerSocket();
@@ -158,7 +349,8 @@ public final class SingleInstanceCoordinator implements AutoCloseable {
                     activationServer,
                     metadataPath,
                     token,
-                    activationHandler
+                    activationHandler,
+                    shutdownHandler
             );
             coordinator.startListener();
             coordinator.writeMetadata(loopbackAddress);
@@ -197,6 +389,7 @@ public final class SingleInstanceCoordinator implements AutoCloseable {
         }
     }
 
+    /** Authenticates local activation/shutdown requests; OK acknowledges enqueueing, not UI completion. */
     private void handleActivationRequest(Socket socket) {
         try (socket;
              DataInputStream input = new DataInputStream(socket.getInputStream());
@@ -204,16 +397,18 @@ public final class SingleInstanceCoordinator implements AutoCloseable {
             socket.setSoTimeout(SOCKET_READ_TIMEOUT_MILLIS);
             String command = input.readUTF();
             String suppliedToken = input.readUTF();
-            if (!COMMAND_ACTIVATE.equals(command) || !tokensMatch(token, suppliedToken)) {
+            Runnable handler = COMMAND_ACTIVATE.equals(command) ? activationHandler
+                    : COMMAND_SHUTDOWN.equals(command) ? shutdownHandler : null;
+            if (handler == null || !tokensMatch(token, suppliedToken)) {
                 output.writeUTF(RESPONSE_DENIED);
                 output.flush();
                 return;
             }
             try {
-                activationHandler.run();
+                handler.run();
                 output.writeUTF(RESPONSE_OK);
             } catch (RuntimeException exception) {
-                log.warn("Failed to handle existing-window activation request", exception);
+                log.warn("Failed to handle existing GUI request: {}", command, exception);
                 output.writeUTF(RESPONSE_ERROR);
             }
             output.flush();
@@ -224,6 +419,7 @@ public final class SingleInstanceCoordinator implements AutoCloseable {
         }
     }
 
+    /** Atomically publishes the local endpoint and process identity while holding the GUI lock. */
     private void writeMetadata(InetAddress loopbackAddress) throws IOException {
         Properties properties = new Properties();
         properties.setProperty("protocolVersion", PROTOCOL_VERSION);
@@ -231,6 +427,9 @@ public final class SingleInstanceCoordinator implements AutoCloseable {
         properties.setProperty("port", Integer.toString(activationServer.getLocalPort()));
         properties.setProperty("token", token);
         properties.setProperty("pid", Long.toString(ProcessHandle.current().pid()));
+        ProcessHandle.Info processInfo = ProcessHandle.current().info();
+        properties.setProperty("startedAt", processInfo.startInstant().map(Instant::toString).orElse(""));
+        properties.setProperty("command", processInfo.command().orElse(""));
 
         Path temporaryPath = Files.createTempFile(metadataPath.getParent(), "gui-instance-", ".tmp");
         try {
@@ -250,8 +449,13 @@ public final class SingleInstanceCoordinator implements AutoCloseable {
         }
     }
 
+    /** Sends the legacy activation request to the current recorded owner. */
     private static boolean notifyExistingInstance(Path metadataPath) {
-        InstanceMetadata metadata = readMetadata(metadataPath);
+        return sendCommand(readMetadata(metadataPath), COMMAND_ACTIVATE);
+    }
+
+    /** Sends an authenticated local request with bounded socket waits, including to older releases. */
+    private static boolean sendCommand(InstanceMetadata metadata, String command) {
         if (metadata == null) {
             return false;
         }
@@ -260,17 +464,18 @@ public final class SingleInstanceCoordinator implements AutoCloseable {
             socket.setSoTimeout(SOCKET_READ_TIMEOUT_MILLIS);
             try (DataOutputStream output = new DataOutputStream(socket.getOutputStream());
                  DataInputStream input = new DataInputStream(socket.getInputStream())) {
-                output.writeUTF(COMMAND_ACTIVATE);
+                output.writeUTF(command);
                 output.writeUTF(metadata.token());
                 output.flush();
                 return RESPONSE_OK.equals(input.readUTF());
             }
         } catch (IOException exception) {
-            log.debug("Existing GUI instance is not ready to receive activation", exception);
+            log.debug("Existing GUI instance is not ready to receive {}", command, exception);
             return false;
         }
     }
 
+    /** Reads a validated loopback endpoint and optional legacy-compatible process identity. */
     private static InstanceMetadata readMetadata(Path metadataPath) {
         if (!Files.isRegularFile(metadataPath)) {
             return null;
@@ -291,7 +496,10 @@ public final class SingleInstanceCoordinator implements AutoCloseable {
             if (port < 1 || port > 65535 || token.isBlank()) {
                 return null;
             }
-            return new InstanceMetadata(address, port, token);
+            return new InstanceMetadata(address, port, token,
+                    Long.parseLong(properties.getProperty("pid", "0")),
+                    properties.getProperty("startedAt", ""), properties.getProperty("command", ""),
+                    Files.getLastModifiedTime(metadataPath).toMillis());
         } catch (IOException | IllegalArgumentException exception) {
             log.debug("Single-instance metadata is not ready or is invalid", exception);
             return null;
@@ -420,6 +628,8 @@ public final class SingleInstanceCoordinator implements AutoCloseable {
     private record LockOwnership(FileChannel channel, FileLock lock) {
     }
 
-    private record InstanceMetadata(InetAddress address, int port, String token) {
+    /** Identity belongs to the data-directory lock owner; empty start time denotes an older release. */
+    private record InstanceMetadata(InetAddress address, int port, String token, long pid,
+                                    String startedAt, String command, long modifiedAtMillis) {
     }
 }

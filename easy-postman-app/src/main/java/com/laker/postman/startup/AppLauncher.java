@@ -42,12 +42,14 @@ public class AppLauncher {
         return GUI_STARTED;
     }
 
+    /** Claims this launch as GUI owner; an older GUI is asked to save and exit before forced takeover. */
     private OptionalInt coordinateGuiInstance() {
         SingleInstanceCoordinator.LaunchResult result;
         try {
-            result = SingleInstanceCoordinator.acquireOrNotify(
+            result = SingleInstanceCoordinator.acquireOrReplace(
                     AppRuntimeLayout.dataRootDirectory(AppLauncher.class),
-                    AppSingleInstanceController::requestActivation
+                    AppSingleInstanceController::requestActivation,
+                    AppSingleInstanceController::requestShutdown
             );
         } catch (IOException | RuntimeException exception) {
             skipHostRuntimeShutdown = true;
@@ -59,12 +61,6 @@ public class AppLauncher {
             singleInstanceCoordinator = result.coordinator();
             return OptionalInt.empty();
         }
-        if (result.status() == SingleInstanceCoordinator.LaunchStatus.EXISTING_INSTANCE_NOTIFIED) {
-            skipHostRuntimeShutdown = true;
-            log.info("Activated the existing EasyPostman GUI instance");
-            return OptionalInt.of(0);
-        }
-
         skipHostRuntimeShutdown = true;
         StartupFailureHandler.showExistingInstanceUnavailableAndExit();
         return OptionalInt.of(GUI_STARTED);

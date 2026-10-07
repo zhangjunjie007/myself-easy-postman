@@ -27,6 +27,7 @@ import com.laker.postman.model.Workspace;
 import com.laker.postman.panel.topmenu.TopMenuBar;
 import com.laker.postman.service.EnvironmentService;
 import com.laker.postman.service.PlmEnvironmentAuthService;
+import com.laker.postman.request.util.HttpUrlUtil;
 import com.laker.postman.service.ideahttp.IntelliJHttpEnvParser;
 import com.laker.postman.service.postman.PostmanEnvironmentParser;
 import com.laker.postman.panel.workspace.WorkspaceTransferCoordinator;
@@ -59,13 +60,13 @@ import java.util.List;
 @Slf4j
 public class EnvironmentPanel extends UiSingletonPanel {
     public static final String EXPORT_FILE_NAME = "EasyPostman-Environments.json";
-    private static final String[] JIT_FIELDS = {"type", "uaaBaseUrl", "tokenUrl", "method",
+    private static final String[] JIT_FIELDS = {"type", "baseUrl", "uaaBaseUrl", "tokenUrl", "method",
             "clientId", "clientSecret", "grantType", "principalHeader", "principalPrefix", "principal",
             "tokenJsonPath", "headerName", "headerPrefix"};
-    private static final String[] PASSWORD_FIELDS = {"type", "uaaBaseUrl", "tokenUrl", "method",
+    private static final String[] PASSWORD_FIELDS = {"type", "baseUrl", "uaaBaseUrl", "tokenUrl", "method",
             "clientId", "clientSecret", "username", "password", "grantType", "tokenJsonPath",
             "headerName", "headerPrefix"};
-    private static final String[] PIN_FIELDS = {"type", "uaaBaseUrl", "tokenUrl", "method",
+    private static final String[] PIN_FIELDS = {"type", "baseUrl", "uaaBaseUrl", "tokenUrl", "method",
             "pin", "pinLocation", "pinName", "bodyTemplate", "headers", "tokenJsonPath",
             "headerName", "headerPrefix"};
     private JTable authTable;
@@ -516,7 +517,7 @@ public class EnvironmentPanel extends UiSingletonPanel {
         loadAuth(env);
     }
 
-    /** Loads only the fields used by this environment's PLM protocol into the right-hand table. */
+    /** Loads the business base URL and PLM authentication fields into the existing table. */
     private void loadAuth(Environment env) {
         if (authTable.isEditing()) {
             authTable.getCellEditor().stopCellEditing();
@@ -535,7 +536,7 @@ public class EnvironmentPanel extends UiSingletonPanel {
                 };
                 for (String field : fields) {
                     Object value = switch (field) {
-                        case "uaaBaseUrl" -> env.get(field);
+                        case "baseUrl", "uaaBaseUrl" -> env.get(field);
                         default -> values.get(field);
                     };
                     authTableModel.addRow(new Object[]{field, value == null ? ""
@@ -549,7 +550,7 @@ public class EnvironmentPanel extends UiSingletonPanel {
         }
     }
 
-    /** Persists PLM fields and the UAA URL, preserving existing request variables on failure. */
+    /** Persists separate business/UAA URLs and PLM fields; restores the old environment on save failure. */
     private boolean saveAuth() {
         if (currentEnvironment == null) {
             return false;
@@ -565,11 +566,13 @@ public class EnvironmentPanel extends UiSingletonPanel {
             JSONObject values = JSONUtil.parseObj(JSONUtil.toJsonStr(
                     previousAuth == null ? defaultAuth() : previousAuth));
             String uaaBaseUrl = null;
+            String baseUrl = null;
             for (int row = 0; row < authTableModel.getRowCount(); row++) {
                 String field = String.valueOf(authTableModel.getValueAt(row, 0));
                 String value = String.valueOf(authTableModel.getValueAt(row, 1));
                 switch (field) {
                     case "uaaBaseUrl" -> uaaBaseUrl = value;
+                    case "baseUrl" -> baseUrl = value;
                     case "bodyTemplate", "headers" -> values.set(field,
                             value.isBlank() ? null : JSONUtil.parse(value));
                     default -> values.set(field, value);
@@ -577,8 +580,15 @@ public class EnvironmentPanel extends UiSingletonPanel {
             }
             PlmAuthConfig auth = JSONUtil.toBean(values, PlmAuthConfig.class);
             PlmEnvironmentAuthService.validate(auth);
+            if (baseUrl != null && !baseUrl.isBlank()) {
+                // Validate with the same URL rules used when sending relative paths.
+                HttpUrlUtil.resolveAgainstBaseUrl(
+                        "/",
+                        baseUrl
+                );
+            }
 
-            // Copy variables before syncing the UAA URL, so a failed disk save cannot alter the old environment.
+            // Copy variables before syncing URLs, so a failed disk save cannot alter the old environment.
             List<Variable> editedVariables = new ArrayList<>();
             if (previousVariables != null) {
                 for (Variable variable : previousVariables) {
@@ -587,6 +597,11 @@ public class EnvironmentPanel extends UiSingletonPanel {
             }
             env.setVariableList(editedVariables);
             updateUrlVariable(env, "uaaBaseUrl", uaaBaseUrl);
+            updateUrlVariable(
+                    env,
+                    "baseUrl",
+                    baseUrl == null ? null : baseUrl.trim()
+            );
             env.setAuth(auth);
             EnvironmentService.saveEnvironment(env);
             originalAuthSnapshot = snapshot;
@@ -605,7 +620,7 @@ public class EnvironmentPanel extends UiSingletonPanel {
         }
     }
 
-    /** Updates the UAA URL variable while preserving other imported request variables. */
+    /** Sets or removes one URL variable while preserving other imported request variables. */
     private void updateUrlVariable(Environment env, String key, String value) {
         if (value == null || value.isBlank()) {
             env.removeVariable(key);

@@ -12,6 +12,8 @@ import com.laker.postman.request.model.TransportAuth;
 
 
 import com.laker.postman.service.variable.RequestExecutionContext;
+import com.laker.postman.service.EnvironmentService;
+import com.laker.postman.model.Environment;
 import com.laker.postman.service.variable.VariableResolver;
 import com.laker.postman.request.util.HttpUrlUtil;
 import lombok.experimental.UtilityClass;
@@ -47,6 +49,7 @@ public class PreparedRequestFinalizer {
 
     /**
      * 在请求真正发出前统一完成变量替换和认证决策。
+     * 相对路径按当前环境的业务 baseUrl 拼接；不使用认证地址，且不修改已保存的请求。
      * 所有发送路径（普通发送、Functional、Performance、复制 cURL）
      * 都应尽量复用这里，避免不同入口出现不一致行为。
      */
@@ -58,6 +61,13 @@ public class PreparedRequestFinalizer {
             replaceVariablesInUrlencodedList(request.urlencodedList);
 
             request.url = VariableResolver.resolve(request.url);
+            if (request.url != null && request.url.startsWith("/")) {
+                Environment environment = EnvironmentService.getActiveEnvironment();
+                request.url = HttpUrlUtil.resolveAgainstBaseUrl(
+                        request.url,
+                        environment == null ? null : environment.get("baseUrl")
+                );
+            }
             replaceVariablesInParamsList(request.pathVariablesList);
             request.url = HttpUrlUtil.replacePathVariables(request.url, request.pathVariablesList);
             replaceVariablesInParamsList(request.paramsList);

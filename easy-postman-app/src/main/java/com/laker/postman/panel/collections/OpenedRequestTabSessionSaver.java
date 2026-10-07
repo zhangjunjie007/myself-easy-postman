@@ -45,6 +45,18 @@ public class OpenedRequestTabSessionSaver {
         ));
     }
 
+    /**
+     * Captures current tab edits for a replacement GUI without saving collections or showing dialogs.
+     * Must run on the EDT; only already-created editors are visited during partial startup.
+     */
+    public static void saveOpenTabsForRestart() {
+        UiSingletonFactory.getExistingInstance(RequestEditorPanel.class).ifPresent(editPanel ->
+                OpenedRequestTabsStore.saveAll(OpenedRequestTabSnapshotCollector.limitToMostRecent(
+                        OpenedRequestTabSnapshotCollector.collectOpenedRequestItems(editPanel.getTabbedPane(), true),
+                        SettingManager.getMaxOpenedRequestsCount()
+                )));
+    }
+
     private static int showUnsavedChangesDialog() {
         String[] options = {
                 I18nUtil.getMessage(MessageKeys.EXIT_SAVE_ALL),

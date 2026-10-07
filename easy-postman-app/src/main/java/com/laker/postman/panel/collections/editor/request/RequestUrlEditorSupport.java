@@ -85,11 +85,12 @@ class RequestUrlEditorSupport {
         return paramsListEquals(merged, currentPathVariables) ? currentPathVariables : merged;
     }
 
+    /** Keeps HTTP paths relative for environment resolution; still supplies protocols for host-only URLs. */
     static String prependProtocolIfNeeded(String url, boolean webSocketProtocol, String defaultProtocol) {
         if (url == null || url.isBlank()) {
             return url;
         }
-        if (url.startsWith("{{")) {
+        if (url.startsWith("{{") || !webSocketProtocol && url.startsWith("/")) {
             return url;
         }
 

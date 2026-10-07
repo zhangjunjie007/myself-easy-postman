@@ -33,10 +33,11 @@ public class StartupFailureHandler {
         );
     }
 
+    /** Reports a failed replacement when the old GUI cannot be safely identified or terminated. */
     public void showExistingInstanceUnavailableAndExit() {
         showErrorAndExit(
                 null,
-                "An existing GUI instance holds the lock but could not be activated",
+                "Could not safely replace the existing GUI instance holding the data-directory lock",
                 MessageKeys.STARTUP_SINGLE_INSTANCE_UNREACHABLE
         );
     }

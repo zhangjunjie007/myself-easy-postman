@@ -163,11 +163,11 @@ public class EnvironmentService {
     }
 
     /**
-     * 添加或更新环境
+     * 添加或更新环境并持久化。普通变量保存保留 Token，认证字段变化由发送时的配置快照校验失效。
+     * @param environment 待保存的环境，认证配置必须有效；允许原对象就地修改
      */
     public static void saveEnvironment(Environment environment) {
         PlmEnvironmentAuthService.validate(environment.getAuth());
-        PlmEnvironmentAuthService.clear();
         // 如果环境没有 ID，自动生成一个
         if (environment.getId() == null) {
             environment.setId("env-" + IdUtil.simpleUUID());
@@ -210,10 +210,13 @@ public class EnvironmentService {
     }
 
     /**
-     * 设置激活的环境
+     * 设置激活环境并持久化；重复选中当前环境保留 Token，切换到另一环境时清除旧凭据。
+     * @param id 已管理环境的 ID
      */
     public static void setActiveEnvironment(String id) {
-        PlmEnvironmentAuthService.clear();
+        if (activeEnvironment != environments.get(id)) {
+            PlmEnvironmentAuthService.clear();
+        }
         if (activeEnvironment != null) {
             activeEnvironment.setActive(false);
         }

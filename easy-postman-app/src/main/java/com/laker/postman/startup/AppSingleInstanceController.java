@@ -1,6 +1,8 @@
 package com.laker.postman.startup;
 
 import com.laker.postman.frame.MainFrame;
+import com.laker.postman.ioc.BeanFactory;
+import com.laker.postman.panel.lifecycle.AppExitCoordinator;
 import lombok.experimental.UtilityClass;
 
 import javax.swing.SwingUtilities;
@@ -28,6 +30,17 @@ class AppSingleInstanceController {
         if (mainFrame != null && ACTIVATION_PENDING.compareAndSet(true, false)) {
             activate(mainFrame);
         }
+    }
+
+    /** Queues a save-and-exit without user prompts; the new launcher handles an unresponsive EDT. */
+    void requestShutdown() {
+        SwingUtilities.invokeLater(() -> {
+            if (READY_MAIN_FRAME.get() != null) {
+                BeanFactory.getBean(AppExitCoordinator.class).exitForRestart();
+            } else {
+                System.exit(0);
+            }
+        });
     }
 
     void registerReadyMainFrame(MainFrame mainFrame) {
