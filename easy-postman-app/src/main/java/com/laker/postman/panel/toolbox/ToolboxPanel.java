@@ -189,6 +189,7 @@ public class ToolboxPanel extends UiSingletonPanel {
     }
 
     // ===== 注册所有工具 =====
+    /** Registers built-in tools by category; tool pages are created lazily on first selection. */
     private void registerAllTools() {
         // 格式化
         regBuiltIn("json", MessageKeys.TOOLBOX_JSON, "icons/format.svg", GRP_FORMAT, JsonToolPanel::new);
@@ -199,6 +200,7 @@ public class ToolboxPanel extends UiSingletonPanel {
         regBuiltIn("oracle", MessageKeys.TOOLBOX_ORACLE, "icons/database.svg", GRP_DB, OraclePanel::new);
         // 开发
         regBuiltIn("diff", MessageKeys.TOOLBOX_DIFF, "icons/file.svg", GRP_DEV, DiffPanel::new);
+        regBuiltIn("wsdl", MessageKeys.TOOLBOX_WSDL, "icons/import.svg", GRP_DEV, WsdlToolPanel::new);
         registerPluginTools();
     }
 

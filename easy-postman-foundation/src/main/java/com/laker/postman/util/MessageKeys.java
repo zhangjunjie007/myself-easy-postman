@@ -1203,6 +1203,12 @@ public final class MessageKeys {
     public static final String COLLECTIONS_IMPORT_POSTMAN = "collections.import.postman";
     public static final String COLLECTIONS_IMPORT_SWAGGER2 = "collections.import.swagger2";
     public static final String COLLECTIONS_IMPORT_OPENAPI3 = "collections.import.openapi3";
+    public static final String COLLECTIONS_IMPORT_WSDL_FILE = "collections.import.wsdl.file";
+    public static final String COLLECTIONS_IMPORT_WSDL_FILTER = "collections.import.wsdl.filter";
+    public static final String COLLECTIONS_IMPORT_WSDL_LOADING = "collections.import.wsdl.loading";
+    public static final String COLLECTIONS_IMPORT_WSDL_INVALID = "collections.import.wsdl.invalid";
+    public static final String COLLECTIONS_IMPORT_WSDL_WORKSPACE_CHANGED = "collections.import.wsdl.workspace_changed";
+    public static final String COLLECTIONS_IMPORT_WSDL_SAVE_FAILED = "collections.import.wsdl.save_failed";
     public static final String COLLECTIONS_IMPORT_CURL = "collections.import.curl";
     public static final String COLLECTIONS_IMPORT_HAR = "collections.import.har";
     public static final String COLLECTIONS_IMPORT_HTTP = "collections.import.http";
@@ -2570,6 +2576,15 @@ public final class MessageKeys {
     public static final String TOOLBOX_JSON_TOOLTIP_PASTE = "toolbox.json.tooltip.paste";
     public static final String TOOLBOX_JSON_TOOLTIP_CLEAR = "toolbox.json.tooltip.clear";
     public static final String TOOLBOX_JSON_TOOLTIP_SWAP = "toolbox.json.tooltip.swap";
+
+    // ============ WSDL / SOAP 工具相关 ============
+    public static final String TOOLBOX_WSDL = "toolbox.wsdl";
+    public static final String TOOLBOX_WSDL_URL = "toolbox.wsdl.url";
+    public static final String TOOLBOX_WSDL_IMPORT_URL = "toolbox.wsdl.import_url";
+    public static final String TOOLBOX_WSDL_PLACEHOLDER = "toolbox.wsdl.placeholder";
+    public static final String TOOLBOX_WSDL_HELP = "toolbox.wsdl.help";
+    public static final String TOOLBOX_WSDL_SUCCESS = "toolbox.wsdl.success";
+    public static final String TOOLBOX_WSDL_COLLECTION_LOAD_FAILED = "toolbox.wsdl.collection_load_failed";
 
     // ============ SQL 工具相关 ============
     public static final String TOOLBOX_SQL = "toolbox.sql";
