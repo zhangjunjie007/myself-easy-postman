@@ -29,6 +29,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
 
 /**
  * 响应体面板，展示 HTTP 响应体内容
@@ -53,6 +55,10 @@ public class ResponseBodyPanel extends JPanel {
     private final SearchButton searchButton; // 搜索按钮
     private Map<String, List<String>> lastHeaders;
     private final EasyComboBox<String> syntaxComboBox;
+    private final EasyComboBox<String> soapViewComboBox;
+    private String originalBody;
+    private String soapBusinessXml;
+    private SwingWorker<String, Void> soapViewWorker;
     private final FormatButton formatButton;
     private final CopyButton copyButton;
     private final GenerateModelButton generateModelButton;
@@ -77,6 +83,10 @@ public class ResponseBodyPanel extends JPanel {
 
     private final JLabel sizeWarningLabel;
 
+    /**
+     * 创建响应展示；SOAP 字符串中的业务 XML 仅转换视图，保存响应仍使用原始 HTTP 数据。
+     * @param enableSaveButton 是否允许将真实 HTTP 响应保存到集合
+     */
     public ResponseBodyPanel(boolean enableSaveButton) {
         setLayout(new BorderLayout());
         ToolWindowSurfaceStyle.applyCard(this);
@@ -124,6 +134,15 @@ public class ResponseBodyPanel extends JPanel {
         syntaxComboBox.setFocusable(false);
         toolBarPanel.add(syntaxComboBox);
         toolBarPanel.add(Box.createHorizontalStrut(4)); // 间隔
+
+        soapViewComboBox = new EasyComboBox<>(new String[]{
+                I18nUtil.getMessage(MessageKeys.RESPONSE_SOAP_BUSINESS_XML),
+                I18nUtil.getMessage(MessageKeys.RESPONSE_SOAP_ORIGINAL)
+        }, EasyComboBox.WidthMode.FIXED_MAX);
+        soapViewComboBox.setToolTipText(I18nUtil.getMessage(MessageKeys.RESPONSE_SOAP_VIEW_TOOLTIP));
+        soapViewComboBox.setVisible(false);
+        soapViewComboBox.addActionListener(e -> showSoapView());
+        toolBarPanel.add(soapViewComboBox);
 
         // 添加大小提示标签
         sizeWarningLabel = new JLabel();
@@ -219,6 +238,7 @@ public class ResponseBodyPanel extends JPanel {
      * 支持两种保存模式：
      * 1. 如果有临时文件路径（大文件或二进制文件），从临时文件复制
      * 2. 否则直接保存编辑器中的文本内容
+     * 业务 XML 视图下载当前展示内容，原始 SOAP 视图仍保留原文件下载行为。
      * </p>
      */
     private void saveFile() {
@@ -234,7 +254,7 @@ public class ResponseBodyPanel extends JPanel {
         if (userSelection == SystemFileChooser.APPROVE_OPTION) {
             File destFile = fileChooser.getSelectedFile();
             try {
-                if (currentFilePath != null && !currentFilePath.isEmpty()) {
+                if (currentFilePath != null && !currentFilePath.isEmpty() && !isSoapBusinessView()) {
                     // 如果是文件下载（如二进制文件），从临时文件复制
                     try (InputStream in = new FileInputStream(currentFilePath);
                          OutputStream out = new FileOutputStream(destFile)) {
@@ -360,11 +380,13 @@ public class ResponseBodyPanel extends JPanel {
      * 1. 自动检测语法类型并设置高亮
      * 2. 显示文件大小警告（如果超过阈值）
      * 3. 根据设置决定是否自动格式化
+     * 4. 后台提取 SOAP 业务 XML；新响应会取消旧任务，避免覆盖后来的结果
      * </p>
      *
      * @param resp HTTP 响应对象
      */
     public void setBodyText(HttpResponse resp) {
+        resetSoapView();
         if (resp == null) {
             clearResponseBody();
             return;
@@ -434,6 +456,66 @@ public class ResponseBodyPanel extends JPanel {
         }
 
         responseBodyPane.setCaretPosition(0);
+        loadSoapView(text);
+    }
+
+    /** 取消旧响应的展示任务并隐藏切换框；必须随每次响应更新和清空调用。 */
+    private void resetSoapView() {
+        if (soapViewWorker != null) soapViewWorker.cancel(true);
+        soapViewWorker = null;
+        originalBody = null;
+        soapBusinessXml = null;
+        soapViewComboBox.setVisible(false);
+    }
+
+    /** 后台解析完整文本；只有当前响应的任务能更新视图，不影响脚本、历史和保存响应。 */
+    private void loadSoapView(String text) {
+        if (text == null || !text.stripLeading().startsWith("<")) return;
+        originalBody = text;
+        soapViewWorker = new SwingWorker<>() {
+            /** XML 解析与格式化放在后台，避免大响应阻塞界面。 */
+            @Override
+            protected String doInBackground() {
+                return com.laker.postman.util.XmlUtil.extractSoapXml(text);
+            }
+
+            /** 只提交当前任务结果；取消或解析失败时保留已展示的原响应。 */
+            @Override
+            protected void done() {
+                // 响应刷新后，即使旧任务已经完成且排队等待 EDT，也不能覆盖新响应。
+                if (soapViewWorker != this) return;
+                soapViewWorker = null;
+                try {
+                    soapBusinessXml = get();
+                    if (soapBusinessXml != null) {
+                        soapViewComboBox.setSelectedIndex(0);
+                        soapViewComboBox.setVisible(true);
+                        showSoapView();
+                        revalidate();
+                    }
+                } catch (CancellationException | ExecutionException exception) {
+                    // 展示转换失败不影响真实 HTTP 响应。
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        };
+        soapViewWorker.execute();
+    }
+
+    /** 切换业务 XML 与原始 SOAP，复制和下载跟随当前视图，原文不重复解码。 */
+    private void showSoapView() {
+        if (soapBusinessXml == null) return;
+        responseBodyPane.setText(isSoapBusinessView() ? soapBusinessXml : originalBody);
+        responseBodyPane.setSyntaxEditingStyle(SyntaxConstants.SYNTAX_STYLE_XML);
+        syntaxComboBox.setSelectedIndex(SyntaxType.getBySyntaxStyle(SyntaxConstants.SYNTAX_STYLE_XML).getIndex());
+        responseBodyPane.setCaretPosition(0);
+        updateGenerateModelButtonState();
+    }
+
+    /** 当前视图是否为已成功提取的业务 XML，用于决定展示和下载内容。 */
+    private boolean isSoapBusinessView() {
+        return soapBusinessXml != null && soapViewComboBox.getSelectedIndex() == 0;
     }
 
     /**
@@ -511,11 +593,13 @@ public class ResponseBodyPanel extends JPanel {
         // 大文件不自动格式化
     }
 
+    /** 控制响应操作可用状态，同时保留 SOAP 视图选择。 */
     @Override
     public void setEnabled(boolean enabled) {
         super.setEnabled(enabled);
         responseBodyPane.setEnabled(enabled);
         syntaxComboBox.setEnabled(enabled);
+        soapViewComboBox.setEnabled(enabled);
         searchButton.setEnabled(enabled);
         downloadButton.setEnabled(enabled);
         searchableTextArea.setEnabled(enabled);

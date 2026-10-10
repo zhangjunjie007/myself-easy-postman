@@ -17,10 +17,15 @@ public class EnvironmentComboBox extends JComboBox<EnvironmentItem> {
     @Setter
     private Consumer<Environment> onEnvironmentChange;
 
+    /**
+     * 创建顶部环境选择框，预留长名称的显示空间；窄窗口允许收缩，悬停显示完整名称。
+     * 初始化和重载期间只更新展示，不触发环境切换回调。
+     */
     public EnvironmentComboBox() {
         setRenderer(new EnvironmentItemRenderer());
-        setPreferredSize(new Dimension(120, 28));
-        setMaximumSize(new Dimension(120, 28));
+        setMinimumSize(new Dimension(120, 28));
+        setPreferredSize(new Dimension(200, 28));
+        setMaximumSize(new Dimension(200, 28));
         setFont(FontsUtil.getDefaultFont(Font.PLAIN)); // 使用用户设置的字体大小
         setFocusable(false);
         // 设置无边框样式
@@ -30,8 +35,9 @@ public class EnvironmentComboBox extends JComboBox<EnvironmentItem> {
         applyCustomStyle();
 
         addActionListener(e -> {
-            if (isUpdating) return;
             EnvironmentItem item = (EnvironmentItem) getSelectedItem();
+            setToolTipText(item == null ? null : item.toString());
+            if (isUpdating) return;
             if (item != null && item.getEnvironment() != null) {
                 String envId = item.getEnvironment().getId();
                 if (envId != null) {

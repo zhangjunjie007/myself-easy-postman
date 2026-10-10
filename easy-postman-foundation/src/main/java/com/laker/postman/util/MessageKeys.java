@@ -1624,6 +1624,9 @@ public final class MessageKeys {
 
     // ============ 响应头面板相关 ============
     public static final String RESPONSE_HEADERS_COLUMN_NAME = "response.headers.column.name";
+    public static final String RESPONSE_SOAP_BUSINESS_XML = "response.soap.business_xml";
+    public static final String RESPONSE_SOAP_ORIGINAL = "response.soap.original";
+    public static final String RESPONSE_SOAP_VIEW_TOOLTIP = "response.soap.view.tooltip";
     public static final String RESPONSE_HEADERS_COLUMN_VALUE = "response.headers.column.value";
     public static final String RESPONSE_HEADERS_COPY_SELECTED = "response.headers.copy_selected";
     public static final String RESPONSE_HEADERS_COPY_CELL = "response.headers.copy_cell";
