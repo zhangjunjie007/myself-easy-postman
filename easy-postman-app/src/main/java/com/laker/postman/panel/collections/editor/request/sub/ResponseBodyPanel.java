@@ -3,6 +3,7 @@ package com.laker.postman.panel.collections.editor.request.sub;
 import com.laker.postman.common.component.notification.NotificationCenter;
 
 import cn.hutool.core.util.XmlUtil;
+import com.formdev.flatlaf.FlatClientProperties;
 import com.formdev.flatlaf.util.SystemFileChooser;
 import com.laker.postman.common.UiSingletonFactory;
 import com.laker.postman.common.component.EasyComboBox;
@@ -18,6 +19,9 @@ import com.laker.postman.util.*;
 import lombok.Getter;
 import org.fife.ui.rsyntaxtextarea.RSyntaxTextArea;
 import org.fife.ui.rsyntaxtextarea.SyntaxConstants;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.ObjectNode;
 
 import javax.imageio.ImageIO;
 import javax.swing.*;
@@ -54,12 +58,14 @@ public class ResponseBodyPanel extends JPanel {
     private String fileName = DEFAULT_FILE_NAME; // 默认下载文件名
     private final SearchButton searchButton; // 搜索按钮
     private Map<String, List<String>> lastHeaders;
+    private HttpResponse currentResponse;
     private final EasyComboBox<String> syntaxComboBox;
     private final EasyComboBox<String> soapViewComboBox;
     private String originalBody;
     private String soapBusinessXml;
     private SwingWorker<String, Void> soapViewWorker;
     private final FormatButton formatButton;
+    private final JToggleButton autoSortJsonKeysButton;
     private final CopyButton copyButton;
     private final GenerateModelButton generateModelButton;
     private final WrapToggleButton wrapButton;
@@ -84,7 +90,7 @@ public class ResponseBodyPanel extends JPanel {
     private final JLabel sizeWarningLabel;
 
     /**
-     * 创建响应展示；SOAP 字符串中的业务 XML 仅转换视图，保存响应仍使用原始 HTTP 数据。
+     * 创建响应展示；SOAP 业务 XML 与 JSON 键排序仅转换视图，保存响应仍使用原始 HTTP 数据。
      * @param enableSaveButton 是否允许将真实 HTTP 响应保存到集合
      */
     public ResponseBodyPanel(boolean enableSaveButton) {
@@ -161,6 +167,27 @@ public class ResponseBodyPanel extends JPanel {
         });
         toolBarPanel.add(searchButton);
         toolBarPanel.add(Box.createHorizontalStrut(1)); // 间隔
+
+        autoSortJsonKeysButton = new JToggleButton();
+        autoSortJsonKeysButton.setToolTipText(
+                I18nUtil.getMessage(MessageKeys.RESPONSE_BODY_AUTO_SORT_JSON_KEYS_TOOLTIP));
+        autoSortJsonKeysButton.getAccessibleContext().setAccessibleName(
+                I18nUtil.getMessage(MessageKeys.RESPONSE_BODY_AUTO_SORT_JSON_KEYS));
+        autoSortJsonKeysButton.setFocusable(false);
+        autoSortJsonKeysButton.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        autoSortJsonKeysButton.putClientProperty(
+                FlatClientProperties.BUTTON_TYPE, FlatClientProperties.BUTTON_TYPE_TOOLBAR_BUTTON);
+        updateAutoSortJsonKeysIcon(false);
+        autoSortJsonKeysButton.addItemListener(e -> updateAutoSortJsonKeysIcon(autoSortJsonKeysButton.isSelected()));
+        autoSortJsonKeysButton.addActionListener(e -> {
+            // Only rerender JSON: a sort toggle must not reset the selected SOAP view or media playback.
+            if (currentResponse != null && SyntaxConstants.SYNTAX_STYLE_JSON.equals(
+                    detectSyntax(currentResponse.body, extractContentType(currentResponse.headers)))) {
+                setBodyText(currentResponse);
+            }
+        });
+        toolBarPanel.add(autoSortJsonKeysButton);
+        toolBarPanel.add(Box.createHorizontalStrut(1));
 
         // 换行按钮
         wrapButton = new WrapToggleButton();
@@ -304,7 +331,7 @@ public class ResponseBodyPanel extends JPanel {
 
     /**
      * 格式化内容
-     * 根据 Content-Type 对 JSON 或 XML 进行格式化美化
+     * 根据 Content-Type 格式化 JSON/XML；JSON 排序只改变当前展示内容。
      */
     private void formatContent() {
         String text = responseBodyPane.getText();
@@ -317,7 +344,7 @@ public class ResponseBodyPanel extends JPanel {
         try {
             String formatted = null;
             if (contentType.contains("json") || JsonUtil.isTypeJSON(text)) {
-                formatted = JsonUtil.toJsonPrettyStr(text);
+                formatted = formatJson(text, autoSortJsonKeysButton.isSelected());
             } else if (contentType.contains("xml")) {
                 formatted = XmlUtil.format(text);
             }
@@ -381,12 +408,14 @@ public class ResponseBodyPanel extends JPanel {
      * 2. 显示文件大小警告（如果超过阈值）
      * 3. 根据设置决定是否自动格式化
      * 4. 后台提取 SOAP 业务 XML；新响应会取消旧任务，避免覆盖后来的结果
+     * 5. 可选 JSON 键排序仅作用于小响应；保留原响应以便关闭排序后恢复
      * </p>
      *
      * @param resp HTTP 响应对象
      */
     public void setBodyText(HttpResponse resp) {
         resetSoapView();
+        currentResponse = resp;
         if (resp == null) {
             clearResponseBody();
             return;
@@ -448,7 +477,12 @@ public class ResponseBodyPanel extends JPanel {
         updateGenerateModelButtonState();
 
         // 根据设置和大小决定是否自动格式化
-        if (SettingManager.isAutoFormatResponse() && textSize < MAX_AUTO_FORMAT_SIZE) {
+        boolean sortJsonKeys = autoSortJsonKeysButton.isSelected() && SyntaxConstants.SYNTAX_STYLE_JSON.equals(syntax);
+        if (sortJsonKeys && textSize > LARGE_RESPONSE_THRESHOLD) {
+            sizeWarningLabel.setText(sizeWarningLabel.getText() + "  "
+                    + I18nUtil.getMessage(MessageKeys.RESPONSE_BODY_SKIP_AUTO_PROCESSING_LARGE));
+        } else if ((SettingManager.isAutoFormatResponse() || sortJsonKeys)
+                && textSize < MAX_AUTO_FORMAT_SIZE) {
             autoFormatIfPossible(text, contentType);
         } else if (SettingManager.isAutoFormatResponse() && textSize >= MAX_AUTO_FORMAT_SIZE) {
             // 大文件不自动格式化，提示用户手动格式化
@@ -560,8 +594,8 @@ public class ResponseBodyPanel extends JPanel {
      * 自动格式化内容（如果可能）
      * <p>
      * 只有在满足以下条件时才会自动格式化：
-     * 1. 用户开启了自动格式化设置
-     * 2. 文件大小小于阈值（500KB）
+     * 1. 用户开启了自动格式化或 JSON 排序
+     * 2. 文件大小不超过阈值（500KB）
      * 3. 内容类型为 JSON 或 XML
      * </p>
      *
@@ -576,13 +610,14 @@ public class ResponseBodyPanel extends JPanel {
         int textSize = text.getBytes().length;
 
         // 小文件直接格式化
-        if (textSize < LARGE_RESPONSE_THRESHOLD) {
+        if (textSize <= LARGE_RESPONSE_THRESHOLD) {
             try {
                 if (contentType != null && contentType.toLowerCase().contains("json")
                         || JsonUtil.isTypeJSON(text)) {
-                    String pretty = JsonUtil.toJsonPrettyStr(text);
+                    String pretty = formatJson(text, autoSortJsonKeysButton.isSelected());
                     responseBodyPane.setText(pretty);
-                } else if (contentType != null && contentType.toLowerCase().contains("xml")) {
+                } else if (SettingManager.isAutoFormatResponse()
+                        && contentType != null && contentType.toLowerCase().contains("xml")) {
                     String pretty = XmlUtil.format(text);
                     responseBodyPane.setText(pretty);
                 }
@@ -593,7 +628,36 @@ public class ResponseBodyPanel extends JPanel {
         // 大文件不自动格式化
     }
 
-    /** 控制响应操作可用状态，同时保留 SOAP 视图选择。 */
+    /** 按需递归排列对象键；沿用项目 JSON 解析器，保留注释解析和数组顺序。 */
+    private String formatJson(String json, boolean sortKeys) {
+        return sortKeys ? JsonUtil.toJsonPrettyStr(sortJsonValue(JsonUtil.readTree(json)))
+                : JsonUtil.toJsonPrettyStr(json);
+    }
+
+    /** 为显示创建新对象；数组只处理元素内容，不排序元素，也不修改原始响应。 */
+    private JsonNode sortJsonValue(JsonNode value) {
+        if (value.isObject()) {
+            ObjectNode sorted = JsonUtil.createJsonNode();
+            value.propertyNames().stream().sorted().forEach(key -> sorted.set(key, sortJsonValue(value.get(key))));
+            return sorted;
+        }
+        if (value.isArray()) {
+            ArrayNode sorted = JsonUtil.createArrayNode();
+            for (JsonNode item : value) sorted.add(sortJsonValue(item));
+            return sorted;
+        }
+        return value;
+    }
+
+    /** 与换行按钮一致地显示排序开关状态，图标随主题变化。 */
+    private void updateAutoSortJsonKeysIcon(boolean selected) {
+        String iconPath = "icons/sort-keys.svg";
+        autoSortJsonKeysButton.setIcon(selected
+                ? IconUtil.createOnPrimary(iconPath, IconUtil.SIZE_SMALL, IconUtil.SIZE_SMALL)
+                : IconUtil.createThemed(iconPath, IconUtil.SIZE_SMALL, IconUtil.SIZE_SMALL));
+    }
+
+    /** 控制响应操作可用状态，同时保留 SOAP 视图选择和 JSON 排序开关。 */
     @Override
     public void setEnabled(boolean enabled) {
         super.setEnabled(enabled);
@@ -605,6 +669,7 @@ public class ResponseBodyPanel extends JPanel {
         searchableTextArea.setEnabled(enabled);
 
         if (formatButton != null) formatButton.setEnabled(enabled);
+        if (autoSortJsonKeysButton != null) autoSortJsonKeysButton.setEnabled(enabled);
         if (copyButton != null) copyButton.setEnabled(enabled);
         updateGenerateModelButtonState();
         if (wrapButton != null) wrapButton.setEnabled(enabled);

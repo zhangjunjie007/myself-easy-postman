@@ -105,6 +105,26 @@ public final class SingleInstanceCoordinator implements AutoCloseable {
     }
 
     /**
+     * Attempts ownership once without activating or terminating an existing GUI.
+     * @param dataRoot configuration directory to protect against concurrent writers
+     * @param activationHandler host callback for explicit activation requests
+     * @param shutdownHandler host callback for explicit replacement requests
+     * @return primary ownership, or unreachable when another process holds the lock
+     */
+    public static LaunchResult tryAcquire(Path dataRoot, Runnable activationHandler,
+                                         Runnable shutdownHandler) throws IOException {
+        Objects.requireNonNull(dataRoot, "dataRoot");
+        Objects.requireNonNull(activationHandler, "activationHandler");
+        Objects.requireNonNull(shutdownHandler, "shutdownHandler");
+        Path runtimeDirectory = dataRoot.toAbsolutePath().normalize().resolve(RUNTIME_DIRECTORY_NAME);
+        Files.createDirectories(runtimeDirectory);
+        restrictPermissions(runtimeDirectory, OWNER_DIRECTORY_PERMISSIONS);
+        LockOwnership ownership = tryAcquireOwnership(runtimeDirectory.resolve(LOCK_FILE_NAME));
+        return ownership == null ? LaunchResult.existingInstanceUnreachable()
+                : startPrimary(ownership, runtimeDirectory.resolve(METADATA_FILE_NAME), activationHandler, shutdownHandler);
+    }
+
+    /**
      * Acquires GUI ownership for the supplied data directory or asks the
      * existing owner to activate its window.
      */

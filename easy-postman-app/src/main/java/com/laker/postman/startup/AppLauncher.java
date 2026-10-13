@@ -13,6 +13,7 @@ import lombok.extern.slf4j.Slf4j;
 
 import javax.swing.*;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.OptionalInt;
 
 /**
@@ -42,28 +43,28 @@ public class AppLauncher {
         return GUI_STARTED;
     }
 
-    /** Claims this launch as GUI owner; an older GUI is asked to save and exit before forced takeover. */
+    /** Claims the first free configuration slot; running GUIs retain their own data and processes. */
     private OptionalInt coordinateGuiInstance() {
-        SingleInstanceCoordinator.LaunchResult result;
         try {
-            result = SingleInstanceCoordinator.acquireOrReplace(
-                    AppRuntimeLayout.dataRootDirectory(AppLauncher.class),
-                    AppSingleInstanceController::requestActivation,
-                    AppSingleInstanceController::requestShutdown
-            );
+            Path originalRoot = AppRuntimeLayout.dataRootDirectory(AppLauncher.class);
+            for (int number = 1; ; number++) {
+                Path instanceRoot = number == 1 ? originalRoot : originalRoot.resolve("instances/" + number);
+                var result = SingleInstanceCoordinator.tryAcquire(instanceRoot,
+                        AppSingleInstanceController::requestActivation, AppSingleInstanceController::requestShutdown);
+                if (!result.isPrimary()) continue;
+                singleInstanceCoordinator = result.coordinator();
+                if (number > 1) GuiInstanceProfile.initialize(originalRoot, instanceRoot);
+                // Choose the root before any settings/workspace/Swing singleton caches its paths.
+                System.setProperty("easyPostman.data.dir", instanceRoot.toString());
+                System.setProperty("easyPostman.instance.number", String.valueOf(number));
+                return OptionalInt.empty();
+            }
         } catch (IOException | RuntimeException exception) {
+            closeSingleInstanceCoordinator();
             skipHostRuntimeShutdown = true;
             StartupFailureHandler.showSingleInstanceSetupErrorAndExit(exception);
             return OptionalInt.of(GUI_STARTED);
         }
-
-        if (result.isPrimary()) {
-            singleInstanceCoordinator = result.coordinator();
-            return OptionalInt.empty();
-        }
-        skipHostRuntimeShutdown = true;
-        StartupFailureHandler.showExistingInstanceUnavailableAndExit();
-        return OptionalInt.of(GUI_STARTED);
     }
 
     private void configureBaseRuntimeEnvironment() {

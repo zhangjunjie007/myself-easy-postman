@@ -5,6 +5,10 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 
@@ -76,8 +80,21 @@ public class CollectionFilePersistence {
         }
     }
 
+    /** Writes a complete sibling file before replacing saved collections, protecting old data on write failures. */
     private void saveIgnoringLoadGuard(CollectionDocument document) throws IOException {
-        CollectionDocumentJsonCodec.write(new File(filePath), document);
+        Path destination = Path.of(filePath).toAbsolutePath();
+        Files.createDirectories(destination.getParent());
+        Path temporary = Files.createTempFile(destination.getParent(), ".collections-", ".tmp");
+        try {
+            CollectionDocumentJsonCodec.write(temporary.toFile(), document);
+            try {
+                Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException exception) {
+                Files.move(temporary, destination, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(temporary);
+        }
     }
 
     private CollectionDocument defaultDocument(Supplier<CollectionDocument> defaultDocumentSupplier) {

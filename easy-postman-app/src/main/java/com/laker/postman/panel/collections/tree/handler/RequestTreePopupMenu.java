@@ -6,6 +6,7 @@ import com.laker.postman.panel.mock.MockServerPanel;
 import com.laker.postman.panel.sidebar.SidebarTab;
 import com.laker.postman.panel.sidebar.SidebarTabPanel;
 import com.laker.postman.panel.collections.tree.CollectionTreePanel;
+import com.laker.postman.panel.collections.tree.CollectionTreeToolbar;
 import com.laker.postman.panel.collections.tree.coordinator.RequestTreeCoordinator;
 import com.laker.postman.service.collections.CollectionTreeNodes;
 import com.laker.postman.common.component.ToolWindowSurfaceStyle;
@@ -87,7 +88,7 @@ public class RequestTreePopupMenu {
 
 
     /**
-     * 添加分组相关菜单项
+     * 添加分组菜单；新增文件夹及 cURL 导入固定使用打开菜单时的分组，多选时禁用。
      */
     private void addGroupMenuItems(JPopupMenu menu, DefaultMutableTreeNode selectedNode, boolean isMultipleSelection) {
 
@@ -121,7 +122,7 @@ public class RequestTreePopupMenu {
         JMenuItem addGroup = createMenuItem(
                 MessageKeys.COLLECTIONS_MENU_ADD_GROUP,
                 "icons/group.svg",
-                e -> coordinator.addGroupUnderSelected()
+                e -> coordinator.showAddGroupDialog(selectedNode)
         );
         addGroup.setEnabled(!isMultipleSelection);
         menu.add(addGroup);
@@ -134,6 +135,16 @@ public class RequestTreePopupMenu {
         );
         duplicate.setEnabled(!isMultipleSelection);
         menu.add(duplicate);
+
+        JMenuItem importCurl = createMenuItem(
+                MessageKeys.COLLECTIONS_IMPORT_CURL,
+                "icons/curl.svg",
+                e -> CollectionTreeNodes.group(selectedNode)
+                        .ifPresent(group -> UiSingletonFactory.getInstance(CollectionTreeToolbar.class)
+                                .importCurlToGroup(group))
+        );
+        importCurl.setEnabled(!isMultipleSelection);
+        menu.add(importCurl);
 
         // 导出为 Postman
         JMenuItem exportPostman = createMenuItem(

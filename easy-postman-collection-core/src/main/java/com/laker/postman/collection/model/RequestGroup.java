@@ -23,6 +23,7 @@ import java.util.UUID;
 @Setter
 public class RequestGroup implements Serializable {
     private String id = ""; // 唯一标识符
+    private String importSource = ""; // 文档来源的哈希，用于限定增量更新的目标集合
     private String name = ""; // 分组名称
     private String description = ""; // 分组描述
     private String authType = AuthType.INHERIT.getConstant(); // 认证类型（none/apiKey/basic/bearer/digest/inherit），分组默认继承父级认证

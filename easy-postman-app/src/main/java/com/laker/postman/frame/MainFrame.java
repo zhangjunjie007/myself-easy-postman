@@ -31,6 +31,7 @@ public class MainFrame extends JFrame {
     private transient JPanel startupShellPanel;
 
     // 单例模式，确保只有一个实例
+    /** Creates this process's window; additional GUI profiles show their persistent slot number. */
     private MainFrame() {
         super();
         startupShellTransition = new WindowSnapshotTransition(this);
@@ -38,7 +39,9 @@ public class MainFrame extends JFrame {
         windowStateController = new MainWindowStateController(this);
 
         setName(I18nUtil.getMessage(MessageKeys.APP_NAME));
-        setTitle(I18nUtil.getMessage(MessageKeys.APP_NAME));
+        String instanceNumber = System.getProperty("easyPostman.instance.number", "1");
+        setTitle("1".equals(instanceNumber) ? I18nUtil.getMessage(MessageKeys.APP_NAME)
+                : I18nUtil.getMessage(MessageKeys.APP_INSTANCE_TITLE, I18nUtil.getMessage(MessageKeys.APP_NAME), instanceNumber));
         setIconImage(Icons.LOGO.getImage());
         MainWindowChrome.applyInitialDecorations(this);
     }

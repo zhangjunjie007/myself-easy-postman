@@ -99,8 +99,11 @@ public class RequestTreeMouseHandler extends MouseAdapter {
 
     // ==================== 点击处理 ====================
 
+    /** Starts a new tree click after releasing any prior request-creation selection guard. */
     @Override
     public void mousePressed(MouseEvent e) {
+        // 主题/字体刷新可能让 Swing UI 监听器排到本监听器之后，不能依赖它清除上次点击的保护。
+        coordinator.finishRequestCreationSelection();
         if (SwingUtilities.isLeftMouseButton(e) && e.getClickCount() == 1) {
             handleLeftSingleClick(e);
         } else if (SwingUtilities.isLeftMouseButton(e) && e.getClickCount() == 2) {
@@ -111,7 +114,7 @@ public class RequestTreeMouseHandler extends MouseAdapter {
     }
 
     /**
-     * mouseReleased 中拦截 Add/More 按钮区域的点击，避免触发节点展开/收起等默认行为
+     * 拦截 Add/More 按钮区域的点击并结束新增请求的选中保护，避免影响下次点击。
      */
     @Override
     public void mouseReleased(MouseEvent e) {
@@ -121,6 +124,7 @@ public class RequestTreeMouseHandler extends MouseAdapter {
                 e.consume();
             }
         }
+        coordinator.finishRequestCreationSelection();
     }
 
     private void handleLeftSingleClick(MouseEvent e) {
@@ -148,9 +152,9 @@ public class RequestTreeMouseHandler extends MouseAdapter {
         return target != null && (target.isGroupMoreActions() || target.isGroupAddRequestAction());
     }
 
+    /** Creates a request in the clicked group, independent of the current tree selection. */
     private void handleGroupAddRequestClick(DefaultMutableTreeNode groupNode) {
-        // 不在此处 setSelectionPath(path)，避免 group 选中状态与后续 invokeLater 里的
-        // 新请求节点选中产生竞争（addHttpRequestDirectly 内部会定位到新请求节点）
+        // addHttpRequestDirectly 会选中新请求，mouseReleased 后结束选中保护。
         coordinator.addHttpRequestDirectly(groupNode);
     }
 
@@ -160,7 +164,7 @@ public class RequestTreeMouseHandler extends MouseAdapter {
     }
 
     /**
-     * 弹出 group 专属菜单（新增请求、新增分组等）
+     * 弹出 group 专属菜单；新增分组固定使用打开菜单时的父分组。
      */
     private void showGroupActionMenu(DefaultMutableTreeNode groupNode, int x, int y) {
         JPopupMenu menu = new JPopupMenu();
@@ -175,7 +179,7 @@ public class RequestTreeMouseHandler extends MouseAdapter {
         JMenuItem addGroup = new JMenuItem(
                 I18nUtil.getMessage(MessageKeys.COLLECTIONS_MENU_ADD_GROUP),
                 IconUtil.create("icons/group.svg", IconUtil.SIZE_SMALL, IconUtil.SIZE_SMALL));
-        addGroup.addActionListener(ev -> coordinator.addGroupUnderSelected());
+        addGroup.addActionListener(ev -> coordinator.showAddGroupDialog(groupNode));
         menu.add(addGroup);
 
         menu.addSeparator();

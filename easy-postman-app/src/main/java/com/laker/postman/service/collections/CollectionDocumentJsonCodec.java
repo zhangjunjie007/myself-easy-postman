@@ -58,12 +58,14 @@ public class CollectionDocumentJsonCodec {
         return new CollectionDocument(roots);
     }
 
+    /** Serializes group configuration and its import source without changing child request values. */
     private JSONObject toGroupJson(CollectionNode node) {
         JSONObject groupJson = new JSONObject();
         groupJson.set("type", "group");
 
         RequestGroup group = node.asGroup();
         groupJson.set("id", group.getId());
+        groupJson.set("importSource", group.getImportSource());
         groupJson.set("name", group.getName());
         groupJson.set("description", group.getDescription());
         groupJson.set("authType", group.getAuthType());
@@ -102,6 +104,7 @@ public class CollectionDocumentJsonCodec {
         return requestJson;
     }
 
+    /** Restores group configuration; older files without an import source remain valid. */
     private CollectionNode fromGroupJson(JSONObject groupJson) {
         String name = groupJson.getStr("name");
         RequestGroup group = new RequestGroup(name);
@@ -111,6 +114,7 @@ public class CollectionDocumentJsonCodec {
             throw new IllegalArgumentException("Collection group is missing required id: " + name);
         }
         group.setId(id);
+        group.setImportSource(groupJson.getStr("importSource", ""));
 
         if (groupJson.containsKey("description")) {
             group.setDescription(groupJson.getStr("description", ""));

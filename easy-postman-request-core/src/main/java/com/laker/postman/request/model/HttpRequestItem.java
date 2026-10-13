@@ -22,6 +22,7 @@ public class HttpRequestItem implements Serializable {
     public static final int DISABLED_WEBSOCKET_PING_INTERVAL_MS = 0;
 
     private String id = ""; // 唯一标识符
+    private RequestImportMetadata importMetadata; // 上次导入的契约基线，不随用户填写的参数改变
     private String name = ""; // 请求名称
     private String description = ""; // 请求描述（支持Markdown）
     private String url = ""; // 请求URL

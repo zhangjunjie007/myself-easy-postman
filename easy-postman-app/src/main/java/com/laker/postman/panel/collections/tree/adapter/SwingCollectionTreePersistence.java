@@ -68,6 +68,11 @@ public class SwingCollectionTreePersistence {
         return filePersistence.save(currentDocument());
     }
 
+    /** Saves a prepared import before changing the visible tree; false leaves current nodes untouched. */
+    public boolean trySaveDocument(CollectionDocument document) {
+        return filePersistence.save(document);
+    }
+
     /** Loads the selected workspace file and replaces readiness so a failed switch cannot be imported into. */
     public void switchDataFilePath(String path) {
         CompletableFuture<Void> loading = new CompletableFuture<>();

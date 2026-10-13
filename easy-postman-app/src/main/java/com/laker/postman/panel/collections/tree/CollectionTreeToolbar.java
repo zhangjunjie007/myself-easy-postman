@@ -2,6 +2,8 @@ package com.laker.postman.panel.collections.tree;
 
 import com.laker.postman.model.Environment;
 import com.laker.postman.collection.model.RequestGroup;
+import com.laker.postman.collection.model.CollectionNode;
+import com.laker.postman.panel.collections.editor.request.RequestEditSubPanel;
 import com.laker.postman.request.model.HttpRequestItem;
 
 import cn.hutool.core.io.FileUtil;
@@ -31,7 +33,10 @@ import com.laker.postman.service.curl.CurlParser;
 import com.laker.postman.service.har.HarParser;
 import com.laker.postman.service.ideahttp.IntelliJHttpParser;
 import com.laker.postman.collection.importer.postman.PostmanCollectionParser;
-import com.laker.postman.service.swagger.SwaggerParser;
+import com.laker.postman.service.swagger.SwaggerImportService;
+import com.laker.postman.service.swagger.SwaggerIncrementalImport;
+import com.laker.postman.service.WorkspaceService;
+import com.laker.postman.common.async.EasyTaskExecutor;
 import com.laker.postman.util.I18nUtil;
 import com.laker.postman.util.IconUtil;
 import com.laker.postman.util.AsyncClipboardUtil;
@@ -51,10 +56,15 @@ import javax.swing.tree.TreeNode;
 import javax.swing.tree.TreePath;
 import java.awt.*;
 import java.io.File;
+import java.io.IOException;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
+import java.util.function.BooleanSupplier;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import static com.laker.postman.panel.collections.tree.CollectionTreePanel.*;
 
@@ -69,6 +79,7 @@ public class CollectionTreeToolbar extends UiSingletonPanel {
     private static final String FILE_CHOOSER_STATE_APIPOST_IMPORT = "collections.import.apipost";
 
     private SearchTextField searchField;
+    private boolean swaggerImportRunning;
     /**
      * + 按钮（新建集合 / 各种导入）
      */
@@ -361,38 +372,198 @@ public class CollectionTreeToolbar extends UiSingletonPanel {
         }
     }
 
-    // 导入Swagger/OpenAPI集合
+    /** Offers a file or document URL; repeated imports are blocked until the active import completes. */
     private void importSwaggerCollection() {
-        CollectionTreePanel leftPanel = UiSingletonFactory.getInstance(CollectionTreePanel.class);
+        if (swaggerImportRunning) return;
         MainFrame mainFrame = UiSingletonFactory.getInstance(MainFrame.class);
-        SystemFileChooser fileChooser = FileChooserUtil.createOpenFileChooser(
-                FILE_CHOOSER_STATE_SWAGGER_IMPORT,
-                I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_SWAGGER_DIALOG_TITLE));
-        int userSelection = fileChooser.showOpenDialog(mainFrame);
-        if (userSelection == SystemFileChooser.APPROVE_OPTION) {
-            File fileToOpen = fileChooser.getSelectedFile();
+        String title = I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_SWAGGER_DIALOG_TITLE);
+        Object[] options = {I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_SWAGGER_FILE),
+                I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_SWAGGER_URL),
+                I18nUtil.getMessage(MessageKeys.GENERAL_CANCEL)};
+        int choice = JOptionPane.showOptionDialog(mainFrame,
+                I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_SWAGGER_SOURCE), title,
+                JOptionPane.DEFAULT_OPTION, JOptionPane.QUESTION_MESSAGE, null, options, options[0]);
+        URI source;
+        if (choice == 0) {
+            SystemFileChooser chooser = FileChooserUtil.createOpenFileChooser(FILE_CHOOSER_STATE_SWAGGER_IMPORT, title);
+            if (chooser.showOpenDialog(mainFrame) != SystemFileChooser.APPROVE_OPTION) return;
+            source = chooser.getSelectedFile().toURI();
+        } else if (choice == 1) {
+            String url = JOptionPane.showInputDialog(mainFrame,
+                    I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_SWAGGER_URL_PROMPT), title, JOptionPane.PLAIN_MESSAGE);
+            if (url == null) return;
             try {
-                String json = FileUtil.readString(fileToOpen, StandardCharsets.UTF_8);
-                CollectionParseResult parseResult = SwaggerParser.parseSwagger(json);
-                if (parseResult != null) {
-                    DefaultMutableTreeNode collectionNode =
-                            TreeNodeBuilder.buildFromParseResult(parseResult);
-                    leftPanel.getRootTreeNode().add(collectionNode);
-                    leftPanel.getTreeModel().reload();
-                    leftPanel.getCollectionTreePersistence().saveCurrentTree();
-                    leftPanel.getRequestTree().expandPath(new TreePath(collectionNode.getPath()));
-
-                    // 导入环境变量
-                    importEnvironmentsFromParseResult(parseResult);
-
-                    NotificationCenter.showSuccess(I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_SUCCESS));
-                } else {
-                    NotificationCenter.showError(I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_SWAGGER_INVALID));
-                }
-            } catch (Exception ex) {
-                log.error("Import Swagger error", ex);
-                NotificationCenter.showError(I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_FAIL, ex.getMessage()));
+                source = URI.create(url.trim());
+                if (!"http".equalsIgnoreCase(source.getScheme()) && !"https".equalsIgnoreCase(source.getScheme()))
+                    throw new IllegalArgumentException();
+            } catch (IllegalArgumentException exception) {
+                NotificationCenter.showError(I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_SWAGGER_URL_INVALID));
+                return;
             }
+        } else {
+            return;
+        }
+        startSwaggerImport(source);
+    }
+
+    /** Downloads/contracts in the background; applies increments only to the initiating loaded workspace. */
+    private void startSwaggerImport(URI source) {
+        CollectionTreePanel leftPanel = UiSingletonFactory.getInstance(CollectionTreePanel.class);
+        var workspace = WorkspaceService.getInstance().getCurrentWorkspace();
+        var readiness = leftPanel.getCollectionTreePersistence().whenTreeLoaded();
+        swaggerImportRunning = true;
+        NotificationCenter.showInfo(I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_SWAGGER_LOADING));
+        EasyTaskExecutor.execute(() -> {
+            try {
+                readiness.get(60, TimeUnit.SECONDS);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IOException(MessageKeys.TOOLBOX_WSDL_COLLECTION_LOAD_FAILED);
+            } catch (Exception exception) {
+                throw new IOException(MessageKeys.TOOLBOX_WSDL_COLLECTION_LOAD_FAILED);
+            }
+            return SwaggerImportService.load(source);
+        }, parseResult -> {
+            swaggerImportRunning = false;
+            if (WorkspaceService.getInstance().getCurrentWorkspace() != workspace
+                    || leftPanel.getCollectionTreePersistence().whenTreeLoaded() != readiness) {
+                NotificationCenter.showError(I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_WSDL_WORKSPACE_CHANGED));
+                return;
+            }
+            applySwaggerImport(leftPanel, parseResult, () -> WorkspaceService.getInstance().getCurrentWorkspace() == workspace
+                    && leftPanel.getCollectionTreePersistence().whenTreeLoaded() == readiness);
+        }, error -> {
+            swaggerImportRunning = false;
+            if (error instanceof SwaggerImportService.HttpStatusException httpFailure) {
+                NotificationCenter.showError(I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_SWAGGER_HTTP_ERROR, httpFailure.getStatus()));
+                return;
+            }
+            String key = error.getMessage();
+            NotificationCenter.showError(I18nUtil.getMessage(key != null &&
+                    (key.startsWith("collections.import.swagger.") || key.equals(MessageKeys.TOOLBOX_WSDL_COLLECTION_LOAD_FAILED))
+                    ? key : MessageKeys.COLLECTIONS_IMPORT_SWAGGER_INVALID));
+        }, "Swagger-Import");
+    }
+
+    /**
+     * Selects a legacy target once or reuses the exact document source. Saves the prepared collection before
+     * touching tree/tabs; changed dirty editors block the whole import, while unchanged editors keep their drafts.
+     * Existing environments are never re-imported during an update.
+     */
+    private void applySwaggerImport(CollectionTreePanel panel, CollectionParseResult incoming, BooleanSupplier workspaceUnchanged) {
+        try {
+            DefaultMutableTreeNode root = panel.getRootTreeNode();
+            List<DefaultMutableTreeNode> collections = new ArrayList<>();
+            for (int index = 0; index < root.getChildCount(); index++) {
+                DefaultMutableTreeNode child = (DefaultMutableTreeNode) root.getChildAt(index);
+                if (CollectionTreeNodes.group(child).isPresent()) collections.add(child);
+            }
+            int targetIndex = chooseSwaggerTarget(collections, incoming);
+            if (targetIndex == -1) return;
+            if (!workspaceUnchanged.getAsBoolean()) {
+                NotificationCenter.showError(I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_WSDL_WORKSPACE_CHANGED));
+                return;
+            }
+            CollectionDocument current = SwingCollectionTreeDocumentMapper.fromRoot(root);
+            List<CollectionNode> roots = current.mutableRootsCopy();
+            if (targetIndex == 0) {
+                DefaultMutableTreeNode created = TreeNodeBuilder.buildFromParseResult(incoming);
+                roots.add(SwingCollectionTreeDocumentMapper.fromRoot(created).getRoots().get(0));
+                if (!panel.getCollectionTreePersistence().trySaveDocument(new CollectionDocument(roots))) {
+                    NotificationCenter.showError(I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_WSDL_SAVE_FAILED));
+                    return;
+                }
+                root.add(created);
+                panel.getTreeModel().reload(root);
+                panel.getRequestTree().expandPath(new TreePath(created.getPath()));
+                importEnvironmentsFromParseResult(incoming);
+                NotificationCenter.showSuccess(I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_SUCCESS));
+                return;
+            }
+            DefaultMutableTreeNode target = collections.get(targetIndex - 1);
+            CollectionNode existing = SwingCollectionTreeDocumentMapper.fromRoot(target).getRoots().get(0);
+            SwaggerIncrementalImport.Result merged = SwaggerIncrementalImport.merge(existing, incoming);
+            RequestEditorPanel editor = UiSingletonFactory.getInstance(RequestEditorPanel.class);
+            JTabbedPane tabs = editor.getTabbedPane();
+            for (HttpRequestItem changed : merged.changedRequests()) {
+                for (int index = 0; index < tabs.getTabCount(); index++) {
+                    if (tabs.getComponentAt(index) instanceof RequestEditSubPanel requestTab && !requestTab.isSavedResponseTab()
+                            && Objects.equals(requestTab.getId(), changed.getId()) && requestTab.isModified()) {
+                        NotificationCenter.showError(I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_SWAGGER_DIRTY));
+                        return;
+                    }
+                }
+            }
+            if (merged.needsSave()) {
+                for (int index = 0; index < roots.size(); index++) {
+                    if (Objects.equals(roots.get(index).asGroup().getId(), existing.asGroup().getId())) roots.set(index, merged.collection());
+                }
+                if (!panel.getCollectionTreePersistence().trySaveDocument(new CollectionDocument(roots))) {
+                    NotificationCenter.showError(I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_WSDL_SAVE_FAILED));
+                    return;
+                }
+                applySwaggerNodes(target, merged.collection());
+                panel.getTreeModel().reload(target);
+                for (HttpRequestItem changed : merged.changedRequests()) {
+                    for (int index = 0; index < tabs.getTabCount(); index++) {
+                        if (tabs.getComponentAt(index) instanceof RequestEditSubPanel requestTab && !requestTab.isSavedResponseTab()
+                                && Objects.equals(requestTab.getId(), changed.getId())) {
+                            requestTab.initPanelData(changed);
+                            editor.updateTabDisplay(requestTab, changed.getMethod(), changed.getProtocol());
+                        }
+                    }
+                }
+            }
+            NotificationCenter.showSuccess(I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_SWAGGER_INCREMENTAL,
+                    merged.added(), merged.updated(), merged.unchanged()));
+            if (merged.adopted() > 0) NotificationCenter.showInfo(I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_SWAGGER_LEGACY));
+        } catch (IllegalArgumentException exception) {
+            String key = exception.getMessage();
+            NotificationCenter.showError(I18nUtil.getMessage(key != null && key.startsWith("collections.import.swagger.")
+                    ? key : MessageKeys.COLLECTIONS_IMPORT_SWAGGER_INVALID));
+        }
+    }
+
+    /** Returns 0 for a new collection, 1-based target index, or -1 for cancel; identical sources update automatically. */
+    private int chooseSwaggerTarget(List<DefaultMutableTreeNode> collections, CollectionParseResult incoming) {
+        List<Integer> matches = new ArrayList<>();
+        for (int index = 0; index < collections.size(); index++) {
+            RequestGroup group = CollectionTreeNodes.group(collections.get(index)).orElseThrow();
+            if (Objects.equals(group.getImportSource(), incoming.getGroup().getImportSource())) matches.add(index + 1);
+        }
+        if (matches.size() == 1) return matches.get(0);
+        if (collections.isEmpty()) return 0;
+        List<String> options = new ArrayList<>();
+        options.add(I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_SWAGGER_NEW));
+        int suggested = 0;
+        String name = incoming.getGroup().getName().replaceFirst(" \\([^)]*\\)$", "");
+        for (int index = 0; index < collections.size(); index++) {
+            RequestGroup group = CollectionTreeNodes.group(collections.get(index)).orElseThrow();
+            options.add((index + 1) + ": " + group.getName());
+            if (group.getName().replaceFirst(" \\([^)]*\\)$", "").equals(name)) suggested = index + 1;
+        }
+        Object selection = JOptionPane.showInputDialog(UiSingletonFactory.getInstance(MainFrame.class),
+                I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_SWAGGER_TARGET),
+                I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_SWAGGER_DIALOG_TITLE), JOptionPane.QUESTION_MESSAGE,
+                null, options.toArray(), options.get(suggested));
+        return selection == null ? -1 : options.indexOf(selection);
+    }
+
+    /** Applies saved increments by stable IDs, preserving existing group nodes and saved-response children. */
+    private void applySwaggerNodes(DefaultMutableTreeNode target, CollectionNode prepared) {
+        CollectionTreeNodes.group(target).orElseThrow().setImportSource(prepared.asGroup().getImportSource());
+        for (CollectionNode child : prepared.getChildren()) {
+            String id = child.isGroup() ? child.asGroup().getId() : child.asRequest().getId();
+            DefaultMutableTreeNode found = null;
+            for (int index = 0; index < target.getChildCount(); index++) {
+                DefaultMutableTreeNode candidate = (DefaultMutableTreeNode) target.getChildAt(index);
+                String candidateId = child.isGroup() ? CollectionTreeNodes.group(candidate).map(RequestGroup::getId).orElse(null)
+                        : CollectionTreeNodes.request(candidate).map(HttpRequestItem::getId).orElse(null);
+                if (id.equals(candidateId)) { found = candidate; break; }
+            }
+            if (found == null) target.add(SwingCollectionTreeDocumentMapper.toTreeNodes(new CollectionDocument(List.of(child))).get(0));
+            else if (child.isGroup()) applySwaggerNodes(found, child);
+            else if (CollectionTreeNodes.request(found).orElseThrow() != child.asRequest()) CollectionTreeNodes.setRequest(found, child.asRequest());
         }
     }
 
@@ -504,7 +675,19 @@ public class CollectionTreeToolbar extends UiSingletonPanel {
         }
     }
 
+    /** Imports one or more cURL commands into the clicked group; cancelling leaves the collection unchanged. */
+    public void importCurlToGroup(RequestGroup targetGroup) {
+        if (targetGroup == null) return;
+        importCurlToCollection(null, targetGroup);
+    }
+
+    /** Opens cURL import with optional initial text and lets the user choose the destination. */
     private void importCurlToCollection(String defaultCurl) {
+        importCurlToCollection(defaultCurl, null);
+    }
+
+    /** Parses cURL locally; a supplied group fixes the destination, otherwise the existing selection dialog is used. */
+    private void importCurlToCollection(String defaultCurl, RequestGroup targetGroup) {
         MainFrame mainFrame = UiSingletonFactory.getInstance(MainFrame.class);
         String curlText = CurlImportDialog.show(mainFrame,
                 I18nUtil.getMessage(MessageKeys.COLLECTIONS_IMPORT_CURL_DIALOG_TITLE),
@@ -520,7 +703,9 @@ public class CollectionTreeToolbar extends UiSingletonPanel {
 
             boolean batchInput = importResult.totalCommands() > 1;
             boolean saved;
-            if (batchInput) {
+            if (targetGroup != null) {
+                saved = saveRequestsToGroup(importResult.items(), targetGroup);
+            } else if (batchInput) {
                 saved = saveRequestsWithGroupDialog(importResult.items());
             } else {
                 saved = saveRequestWithGroupDialog(importResult.items().get(0));
@@ -613,13 +798,21 @@ public class CollectionTreeToolbar extends UiSingletonPanel {
         return true;
     }
 
+    /** Chooses a destination for batch import; returns false on cancellation. */
     private boolean saveRequestsWithGroupDialog(List<HttpRequestItem> items) {
         CollectionTreePanel collectionPanel = UiSingletonFactory.getInstance(CollectionTreePanel.class);
-        RequestEditorPanel requestEditPanel = UiSingletonFactory.getInstance(RequestEditorPanel.class);
         TreeModel groupTreeModel = collectionPanel.getGroupTreeModel();
         RequestGroup group = CollectionGroupSelectionDialog.chooseGroup(groupTreeModel).orElse(null);
         if (group == null) return false;
 
+        return saveRequestsToGroup(items, group);
+    }
+
+    /** Saves imported requests with new IDs into one group and opens the last; empty input is not saved. */
+    private boolean saveRequestsToGroup(List<HttpRequestItem> items, RequestGroup group) {
+        if (items == null || items.isEmpty() || group == null) return false;
+        CollectionTreePanel collectionPanel = UiSingletonFactory.getInstance(CollectionTreePanel.class);
+        RequestEditorPanel requestEditPanel = UiSingletonFactory.getInstance(RequestEditorPanel.class);
         HttpRequestItem lastItem = null;
         for (HttpRequestItem item : items) {
             item.setId(IdUtil.simpleUUID());

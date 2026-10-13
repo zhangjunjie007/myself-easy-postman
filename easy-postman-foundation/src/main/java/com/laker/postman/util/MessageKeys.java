@@ -626,7 +626,15 @@ public final class MessageKeys {
     public static final String WORKSPACE_CLONE_FROM_REMOTE = "workspace.clone.from.remote";
     public static final String WORKSPACE_INIT_LOCAL = "workspace.init.local";
     public static final String WORKSPACE_RENAME = "workspace.rename";
+    public static final String WORKSPACE_REMOVE = "workspace.remove";
+    public static final String WORKSPACE_REMOVE_CONFIRM = "workspace.remove.confirm";
+    public static final String WORKSPACE_REMOVE_FAILED = "workspace.remove.failed";
+    public static final String WORKSPACE_REMOVE_REFRESH_FAILED = "workspace.remove.refresh.failed";
+    /** @deprecated Use {@link #WORKSPACE_REMOVE}. */
+    @Deprecated
     public static final String WORKSPACE_DELETE = "workspace.delete";
+    /** @deprecated Use {@link #WORKSPACE_REMOVE_CONFIRM}. */
+    @Deprecated
     public static final String WORKSPACE_DELETE_CONFIRM = "workspace.delete.confirm";
     public static final String WORKSPACE_SWITCH = "workspace.switch";
     public static final String WORKSPACE_INFO = "workspace.info";
@@ -1264,6 +1272,34 @@ public final class MessageKeys {
     public static final String COLLECTIONS_IMPORT_POSTMAN_INVALID = "collections.import.postman.invalid";
     public static final String COLLECTIONS_IMPORT_SWAGGER_DIALOG_TITLE = "collections.import.swagger.dialog_title";
     public static final String COLLECTIONS_IMPORT_SWAGGER_INVALID = "collections.import.swagger.invalid";
+    public static final String TOOLBOX_ES_COMPLETION_KEYWORD = "toolbox.es.completion.keyword";
+    public static final String TOOLBOX_ES_COMPLETION_FIELD = "toolbox.es.completion.field";
+    public static final String TOOLBOX_ES_COMPLETION_HELP = "toolbox.es.completion.help";
+    public static final String TOOLBOX_ES_COMPLETION_LOADING = "toolbox.es.completion.loading";
+    public static final String TOOLBOX_ES_COMPLETION_READY = "toolbox.es.completion.ready";
+    public static final String TOOLBOX_ES_COMPLETION_FAILED = "toolbox.es.completion.failed";
+    public static final String TOOLBOX_ES_ERR_PLACEHOLDERS = "toolbox.es.err.placeholders";
+    public static final String TOOLBOX_ES_ERR_INVALID_DSL = "toolbox.es.err.invalid_dsl";
+    public static final String TOOLBOX_ES_ERR_HOST_INVALID = "toolbox.es.err.host_invalid";
+    public static final String APP_INSTANCE_TITLE = "app.instance.title";
+    public static final String COLLECTIONS_IMPORT_SWAGGER_FILE = "collections.import.swagger.file";
+    public static final String COLLECTIONS_IMPORT_SWAGGER_URL = "collections.import.swagger.url";
+    public static final String COLLECTIONS_IMPORT_SWAGGER_SOURCE = "collections.import.swagger.source";
+    public static final String COLLECTIONS_IMPORT_SWAGGER_URL_PROMPT = "collections.import.swagger.url_prompt";
+    public static final String COLLECTIONS_IMPORT_SWAGGER_URL_INVALID = "collections.import.swagger.url_invalid";
+    public static final String COLLECTIONS_IMPORT_SWAGGER_LOADING = "collections.import.swagger.loading";
+    public static final String COLLECTIONS_IMPORT_SWAGGER_TARGET = "collections.import.swagger.target";
+    public static final String COLLECTIONS_IMPORT_SWAGGER_NEW = "collections.import.swagger.new";
+    public static final String COLLECTIONS_IMPORT_SWAGGER_INCREMENTAL = "collections.import.swagger.incremental";
+    public static final String COLLECTIONS_IMPORT_SWAGGER_DIRTY = "collections.import.swagger.dirty";
+    public static final String COLLECTIONS_IMPORT_SWAGGER_LEGACY = "collections.import.swagger.legacy";
+    public static final String COLLECTIONS_IMPORT_SWAGGER_AMBIGUOUS = "collections.import.swagger.ambiguous";
+    public static final String COLLECTIONS_IMPORT_SWAGGER_CONFLICT = "collections.import.swagger.conflict";
+    public static final String COLLECTIONS_IMPORT_SWAGGER_HTTP_ERROR = "collections.import.swagger.http_error";
+    public static final String COLLECTIONS_IMPORT_SWAGGER_TIMEOUT = "collections.import.swagger.timeout";
+    public static final String COLLECTIONS_IMPORT_SWAGGER_DNS_FAILED = "collections.import.swagger.dns_failed";
+    public static final String COLLECTIONS_IMPORT_SWAGGER_CONNECT_FAILED = "collections.import.swagger.connect_failed";
+    public static final String COLLECTIONS_IMPORT_SWAGGER_TLS_FAILED = "collections.import.swagger.tls_failed";
     public static final String COLLECTIONS_IMPORT_HAR_DIALOG_TITLE = "collections.import.har.dialog_title";
     public static final String COLLECTIONS_IMPORT_HAR_INVALID = "collections.import.har.invalid";
     public static final String COLLECTIONS_IMPORT_CURL_DIALOG_TITLE = "collections.import.curl.dialog_title";
@@ -1554,6 +1590,9 @@ public final class MessageKeys {
     public static final String SETTINGS_GIT_DIFF_LARGE_FILE_THRESHOLD_TOOLTIP = "settings.git.diff.large_file_threshold.tooltip";
     public static final String SETTINGS_GENERAL_AUTO_FORMAT_RESPONSE = "settings.general.auto_format_response";
     public static final String SETTINGS_GENERAL_AUTO_FORMAT_RESPONSE_TOOLTIP = "settings.general.auto_format_response.tooltip";
+    public static final String RESPONSE_BODY_AUTO_SORT_JSON_KEYS = "response.body.auto_sort_json_keys";
+    public static final String RESPONSE_BODY_AUTO_SORT_JSON_KEYS_TOOLTIP = "response.body.auto_sort_json_keys.tooltip";
+    public static final String RESPONSE_BODY_SKIP_AUTO_PROCESSING_LARGE = "response.body.skip_auto_processing_large";
     public static final String SETTINGS_GENERAL_STARTUP_SPLASH = "settings.general.startup_splash";
     public static final String SETTINGS_GENERAL_STARTUP_SPLASH_TOOLTIP = "settings.general.startup_splash.tooltip";
     public static final String SETTINGS_GENERAL_SIDEBAR_EXPANDED = "settings.general.sidebar_expanded";

@@ -350,6 +350,7 @@ public class OkHttpClientManager {
         );
     }
 
+    /** Builds the requested transport profile; direct/HTTP proxy sockets ignore implicit JVM SOCKS settings. */
     private static OkHttpClient createClient(String baseUri,
                                              boolean followRedirects,
                                              SSLConfigurationUtil.SSLVerificationMode sslMode,
@@ -360,6 +361,8 @@ public class OkHttpClientManager {
                                              CookieJar cookieJar,
                                              HttpRequestProxyPolicy proxyPolicy) {
         OkHttpClient.Builder builder = new OkHttpClient.Builder()
+                // OkHttp owns route selection; JVM-wide SOCKS must not override direct/HTTP proxy sockets.
+                .socketFactory(JvmProxyBypassingSocketFactory.INSTANCE)
                 .connectTimeout(0, TimeUnit.MILLISECONDS)
                 .readTimeout(0, TimeUnit.MILLISECONDS)
                 .writeTimeout(0, TimeUnit.MILLISECONDS)

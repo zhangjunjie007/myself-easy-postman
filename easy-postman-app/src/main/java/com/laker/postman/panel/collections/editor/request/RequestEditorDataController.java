@@ -157,15 +157,18 @@ final class RequestEditorDataController {
         rememberPending(item, originalItem);
     }
 
+    /** Carries the imported contract through drafts while keeping it independent of editable form fields. */
     private HttpRequestItem collectCurrentRequest(boolean fromModel) {
         HttpRequestItem originalRequestItem = originalRequestItem();
-        return HttpRequestEditorDraftMapper.toRequestItem(requestEditorBinder.collectCurrentDraft(
+        HttpRequestItem current = HttpRequestEditorDraftMapper.toRequestItem(requestEditorBinder.collectCurrentDraft(
                 requestId,
                 requestName,
                 currentProtocol,
                 originalRequestItem != null ? originalRequestItem.getResponse() : null,
                 fromModel
         ));
+        if (originalRequestItem != null) current.setImportMetadata(originalRequestItem.getImportMetadata());
+        return current;
     }
 
     private void applyRequestIdentity(HttpRequestItem item) {

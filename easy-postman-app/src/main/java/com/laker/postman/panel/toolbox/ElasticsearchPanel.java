@@ -30,6 +30,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.miginfocom.swing.MigLayout;
 import okhttp3.MediaType;
+import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
@@ -80,6 +81,7 @@ import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.text.MessageFormat;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -89,7 +91,10 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 /**
  * Elasticsearch 可视化 CRUD + DSL 工具面板
@@ -121,6 +126,8 @@ public class ElasticsearchPanel extends JPanel {
     private DefaultListModel<String> indexListModel;
     private DefaultListModel<String> indexFilteredModel;
     private JList<String> indexList;
+    private SearchTextField indexSearchField;
+    private boolean filteringIndices;
     private JTextField newIndexField;
     private JSpinner shardSpinner;
     private JSpinner replicaSpinner;
@@ -134,6 +141,10 @@ public class ElasticsearchPanel extends JPanel {
     private JComboBox<String> methodCombo;
     private JTextField pathField;
     private RSyntaxTextArea dslEditor;
+    private ElasticsearchDslCompletionSupport dslCompletion;
+    private JLabel completionHint;
+    private String completionIndex;
+    private long completionGeneration;
     private RSyntaxTextArea resultArea;
     private SearchableTextArea searchableResultArea;
     private SearchableTextArea searchableDslArea;
@@ -158,6 +169,7 @@ public class ElasticsearchPanel extends JPanel {
     private String baseUrl = "http://localhost:9200";
     private String authHeader = null;
     private boolean connected = false;
+    private long connectionGeneration;
 
     // ===== 常量 =====
     private static final String SEARCH_PATH = "/{index}/_search";
@@ -418,11 +430,17 @@ public class ElasticsearchPanel extends JPanel {
         updateProfileActionState();
     }
 
+    /** Applies a saved profile; changed endpoint/credentials require reconnecting and clear stale fields. */
     private void applyConnectionProfile(ElasticsearchConnectionProfile profile) {
         if (profile == null) {
             return;
         }
-        baseUrl = ElasticsearchConnectionProfileStore.normalizeBaseUrl(profile.getBaseUrl());
+        String nextUrl = ElasticsearchConnectionProfileStore.normalizeBaseUrl(profile.getBaseUrl());
+        if (dslCompletion != null && (!nextUrl.equals(baseUrl)
+                || !Objects.equals(usernameField.getText(), profile.getUsername() == null ? "" : profile.getUsername())
+                || !Objects.equals(new String(passwordField.getPassword()), profile.getPassword() == null ? "" : profile.getPassword())
+                || (getSelectedAuthMode() == AuthMode.BASIC) != profile.isAuthEnabled())) doDisconnect();
+        baseUrl = nextUrl;
         applyHostHistory(profile);
         authModeCombo.setSelectedItem(profile.isAuthEnabled() ? AuthMode.BASIC : AuthMode.NONE);
         usernameField.setText(profile.getUsername() == null ? "" : profile.getUsername());
@@ -643,6 +661,7 @@ public class ElasticsearchPanel extends JPanel {
     }
 
     // ===== 索引管理面板 =====
+    /** Builds index selection/search; both matching options immediately re-filter the current list. */
     private JPanel buildIndexPanel() {
         JPanel panel = new JPanel(new BorderLayout(0, 0));
         panel.setBorder(BorderFactory.createEmptyBorder());
@@ -653,7 +672,7 @@ public class ElasticsearchPanel extends JPanel {
                 I18nUtil.getMessage(MessageKeys.TOOLBOX_ES_INDEX_MANAGEMENT), refreshBtn);
 
         // 搜索框
-        SearchTextField indexSearchField = new SearchTextField();
+        indexSearchField = new SearchTextField();
         indexSearchField.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
         // 索引列表
         indexListModel = new DefaultListModel<>();
@@ -662,11 +681,12 @@ public class ElasticsearchPanel extends JPanel {
         indexList.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         indexList.setCellRenderer(new IndexCellRenderer());
         indexList.addListSelectionListener(e -> {
-            if (!e.getValueIsAdjusting()) {
+            if (!e.getValueIsAdjusting() && !filteringIndices) {
                 List<String> selected = indexList.getSelectedValuesList();
                 if (selected.size() == 1) {
                     pathField.setText("/" + selected.get(0) + "/_search");
                 }
+                loadFieldCompletions();
             }
         });
         indexList.addMouseListener(buildIndexListMouseListener());
@@ -687,6 +707,8 @@ public class ElasticsearchPanel extends JPanel {
                 filterIndices(indexSearchField.getText());
             }
         });
+        indexSearchField.addPropertyChangeListener("caseSensitive", e -> filterIndices(indexSearchField.getText()));
+        indexSearchField.addPropertyChangeListener("wholeWord", e -> filterIndices(indexSearchField.getText()));
 
         // 创建索引面板
         JPanel createPanel = new JPanel(new MigLayout(
@@ -958,15 +980,33 @@ public class ElasticsearchPanel extends JPanel {
         return item;
     }
 
+    /**
+     * Filters literal index names, preserving visible selections without reloading Mapping per keystroke.
+     * @param kw literal keyword; blank or null shows all indices using the current matching options
+     */
     private void filterIndices(String kw) {
-        String lower = kw == null ? "" : kw.trim().toLowerCase();
-        indexFilteredModel.clear();
-        for (int i = 0; i < indexListModel.size(); i++) {
-            String name = indexListModel.get(i);
-            if (lower.isEmpty() || name.toLowerCase().contains(lower)) {
-                indexFilteredModel.addElement(name);
+        String keyword = kw == null ? "" : kw.trim();
+        int flags = indexSearchField.isCaseSensitive() ? 0 : Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE;
+        String literal = Pattern.quote(keyword);
+        Pattern pattern = Pattern.compile(indexSearchField.isWholeWord()
+                ? "(?<![\\p{L}\\p{N}_])" + literal + "(?![\\p{L}\\p{N}_])" : literal, flags);
+        List<String> selected = indexList.getSelectedValuesList();
+        // Replacing the model emits temporary empty selections; do not fetch Mapping for those events.
+        filteringIndices = true;
+        try {
+            indexFilteredModel.clear();
+            for (int i = 0; i < indexListModel.size(); i++) {
+                String name = indexListModel.get(i);
+                if (keyword.isEmpty() || pattern.matcher(name).find()) indexFilteredModel.addElement(name);
             }
+            for (int i = 0; i < indexFilteredModel.size(); i++) {
+                if (selected.contains(indexFilteredModel.get(i))) indexList.addSelectionInterval(i, i);
+            }
+        } finally {
+            filteringIndices = false;
         }
+        indexSearchField.setNoResult(!keyword.isEmpty() && indexFilteredModel.isEmpty());
+        loadFieldCompletions();
     }
 
     /**
@@ -998,6 +1038,7 @@ public class ElasticsearchPanel extends JPanel {
     }
 
     // ===== DSL 编辑 + 结果面板 =====
+    /** Builds the DSL editor with live template selection and keyword/current-index field completion. */
     private JPanel buildDslPanel() {
         JPanel panel = new JPanel(new BorderLayout(0, 4));
         panel.setOpaque(false);
@@ -1085,6 +1126,12 @@ public class ElasticsearchPanel extends JPanel {
 
         dslEditor = createJsonEditor(true);
         dslEditor.setText("{\n  \"query\": {\n    \"match_all\": {}\n  },\n  \"size\": 60\n}");
+        dslCompletion = new ElasticsearchDslCompletionSupport(dslEditor);
+        completionHint = new JLabel(I18nUtil.getMessage(MessageKeys.TOOLBOX_ES_COMPLETION_HELP));
+        completionHint.setFont(FontsUtil.getDefaultFontWithOffset(Font.PLAIN, -1));
+        completionHint.setForeground(ModernColors.getTextSecondary());
+        completionHint.setToolTipText(I18nUtil.getMessage(MessageKeys.TOOLBOX_ES_COMPLETION_HELP));
+        dslHeaderBar.add(completionHint, "gapleft 12, growx, wmin 0");
         // 参考 RequestBodyPanel：可编辑编辑器使用 SearchableTextArea(area) 包装（启用搜索替换）
         searchableDslArea = new SearchableTextArea(dslEditor);
         editorPanel.add(dslHeaderBar, BorderLayout.NORTH);
@@ -1135,6 +1182,7 @@ public class ElasticsearchPanel extends JPanel {
         editorSplit.setResizeWeight(0.4);
 
         panel.add(editorSplit, BorderLayout.CENTER);
+        templateCombo.addActionListener(e -> applyTemplate(templateCombo.getSelectedIndex()));
         return panel;
     }
 
@@ -1270,6 +1318,7 @@ public class ElasticsearchPanel extends JPanel {
         }.execute();
     }
 
+    /** Connects using a fixed endpoint/auth snapshot; a later profile change invalidates this attempt. */
     private void doConnect() {
         String url = getCurrentHost();
         if (url.isEmpty()) {
@@ -1277,6 +1326,11 @@ public class ElasticsearchPanel extends JPanel {
             return;
         }
         url = ElasticsearchConnectionProfileStore.normalizeBaseUrl(url);
+        if (HttpUrl.parse(url) == null) {
+            NotificationCenter.showWarning(I18nUtil.getMessage(MessageKeys.TOOLBOX_ES_ERR_HOST_INVALID));
+            return;
+        }
+        if (connected) doDisconnect();
         baseUrl = url;
         String user = usernameField.getText().trim();
         String pass = new String(passwordField.getPassword());
@@ -1286,15 +1340,23 @@ public class ElasticsearchPanel extends JPanel {
                 : null;
 
         connectBtn.setEnabled(false);
+        long generation = ++connectionGeneration;
         final String finalUrl = baseUrl;
+        Request request = buildRequest("GET", CLUSTER_HEALTH_PATH, null);
+        OkHttpClient client = getHttpClient();
         new SwingWorker<String, Void>() {
+            /** Checks the captured cluster and treats HTTP authentication/server errors as failed connections. */
             @Override
             protected String doInBackground() throws Exception {
-                return doGet(CLUSTER_HEALTH_PATH, "");
+                ResponseWrapper response = executeHttpWithCode(request, client);
+                if (response.code() < 200 || response.code() >= 300) throw new IOException("HTTP " + response.code());
+                return response.body();
             }
 
+            /** A profile change invalidates this attempt before it can mark the new connection ready. */
             @Override
             protected void done() {
+                if (generation != connectionGeneration) return;
                 connectBtn.setEnabled(true);
                 try {
                     String resp = get();
@@ -1317,10 +1379,18 @@ public class ElasticsearchPanel extends JPanel {
         }.execute();
     }
 
+    /** Disconnects this panel and invalidates field downloads so old credentials/fields cannot reappear. */
     private void doDisconnect() {
+        connectionGeneration++;
+        connectBtn.setEnabled(true);
+        executeBtn.setEnabled(true);
         connected = false;
         baseUrl = "http://localhost:9200";
         authHeader = null;
+        completionIndex = null;
+        completionGeneration++;
+        dslCompletion.replaceFields(Map.of());
+        completionHint.setText(I18nUtil.getMessage(MessageKeys.TOOLBOX_ES_COMPLETION_HELP));
         btnCardLayout.show(btnCard, CONNECT_CARD);
         indexListModel.clear();
         indexFilteredModel.clear();
@@ -1343,23 +1413,33 @@ public class ElasticsearchPanel extends JPanel {
         hostField.setText(host);
     }
 
+    /** Refreshes indices with the current filter, selection, and Mapping suggestions retained where possible. */
     private void loadIndices() {
         if (!connected) return;
         String previousSelected = indexList == null ? null : indexList.getSelectedValue();
         String currentPath = pathField == null ? "" : pathField.getText().trim();
         boolean shouldAutoApplyTemplate = currentPath.isBlank() || CLUSTER_HEALTH_PATH.equals(currentPath);
+        long generation = connectionGeneration;
+        Request request = buildRequest("GET", "/_cat/indices?v&format=json&s=index", null);
+        OkHttpClient client = getHttpClient();
         new SwingWorker<String, Void>() {
+            /** Fetches only the captured connection's index list; non-success responses are not index data. */
             @Override
             protected String doInBackground() throws Exception {
-                return doGet("/_cat/indices?v&format=json&s=index", "");
+                ResponseWrapper response = executeHttpWithCode(request, client);
+                if (response.code() < 200 || response.code() >= 300) throw new IOException("HTTP " + response.code());
+                return response.body();
             }
 
+            /** Ignores previous connections and restores the current filtered index selection. */
             @Override
             protected void done() {
+                if (generation != connectionGeneration || !connected) return;
                 try {
                     parseAndFillIndexList(get());
-                    filterIndices("");
-                    if (indexListModel.isEmpty()) {
+                    completionIndex = null;
+                    filterIndices(indexSearchField.getText());
+                    if (indexFilteredModel.isEmpty()) {
                         NotificationCenter.showInfo(I18nUtil.getMessage(MessageKeys.TOOLBOX_ES_INDEX_LIST_EMPTY));
                     } else {
                         int restoreIndex = -1;
@@ -1385,6 +1465,61 @@ public class ElasticsearchPanel extends JPanel {
         }.execute();
     }
 
+    /**
+     * Downloads fields for one selected index, using a connection/auth snapshot off the EDT.
+     * Only the latest selection may update completion; failures retain keyword suggestions.
+     */
+    private void loadFieldCompletions() {
+        if (dslCompletion == null) return;
+        String index = connected && indexList.getSelectedValuesList().size() == 1 ? indexList.getSelectedValue() : null;
+        if (Objects.equals(index, completionIndex)) return;
+        completionIndex = index;
+        long generation = ++completionGeneration;
+        dslCompletion.replaceFields(Map.of());
+        if (index == null) {
+            completionHint.setText(I18nUtil.getMessage(MessageKeys.TOOLBOX_ES_COMPLETION_HELP));
+            return;
+        }
+        completionHint.setText(I18nUtil.getMessage(MessageKeys.TOOLBOX_ES_COMPLETION_LOADING));
+        String connection = baseUrl;
+        String authorization = authHeader;
+        Request request = buildRequest("GET", "/" + index + "/_mapping", null);
+        OkHttpClient client = getHttpClient().newBuilder().callTimeout(20, TimeUnit.SECONDS).build();
+        new SwingWorker<Map<String, String>, Void>() {
+            /** Limits downloaded Mapping bytes before parsing; no query or edit is sent to ES. */
+            @Override
+            protected Map<String, String> doInBackground() throws Exception {
+                try (Response response = client.newCall(request).execute()) {
+                    if (!response.isSuccessful() || response.body() == null) throw new IOException("HTTP " + response.code());
+                    byte[] bytes = response.body().byteStream().readNBytes(8 * 1024 * 1024 + 1);
+                    if (bytes.length > 8 * 1024 * 1024) throw new IOException("Mapping exceeds completion limits");
+                    return ElasticsearchDslCompletionSupport.readFields(new String(bytes, StandardCharsets.UTF_8));
+                }
+            }
+
+            /** Drops obsolete selections and connections before touching the editor's provider. */
+            @Override
+            protected void done() {
+                if (generation != completionGeneration || !connected || !connection.equals(baseUrl)
+                        || !Objects.equals(authorization, authHeader)) return;
+                try {
+                    Map<String, String> fields = get();
+                    dslCompletion.replaceFields(fields);
+                    completionHint.setText(I18nUtil.getMessage(MessageKeys.TOOLBOX_ES_COMPLETION_READY, fields.size()));
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                } catch (Exception exception) {
+                    completionHint.setText(I18nUtil.getMessage(MessageKeys.TOOLBOX_ES_COMPLETION_FAILED));
+                    log.debug("Unable to load Elasticsearch Mapping suggestions", exception);
+                }
+            }
+        }.execute();
+    }
+
+    /**
+     * Loads a template without executing it; example fields/values must be edited before sending.
+     * @param idx index in DSL_TEMPLATES; invalid values leave the current editor untouched
+     */
     private void applyTemplate(int idx) {
         if (idx < 0 || idx >= DSL_TEMPLATES.length) return;
         String selectedIndex = indexList.getSelectedValue();
@@ -1437,6 +1572,7 @@ public class ElasticsearchPanel extends JPanel {
         }.execute();
     }
 
+    /** Validates user-edited path/JSON before sending; template placeholders are never sent to ES. */
     private void executeRequest() {
         if (!connected) {
             NotificationCenter.showWarning(I18nUtil.getMessage(MessageKeys.TOOLBOX_ES_ERR_NOT_CONNECTED));
@@ -1449,8 +1585,24 @@ public class ElasticsearchPanel extends JPanel {
             NotificationCenter.showWarning(I18nUtil.getMessage(MessageKeys.TOOLBOX_ES_ERR_PATH_REQUIRED));
             return;
         }
+        if (path.contains("{index}") || path.contains("{id}")) {
+            NotificationCenter.showWarning(I18nUtil.getMessage(MessageKeys.TOOLBOX_ES_ERR_PLACEHOLDERS));
+            return;
+        }
         pathField.setText(path);
         String body = dslEditor.getText().trim();
+        if (!body.isEmpty() && !JsonUtil.isTypeJSON(body)) {
+            NotificationCenter.showWarning(I18nUtil.getMessage(MessageKeys.TOOLBOX_ES_ERR_INVALID_DSL));
+            return;
+        }
+        // OkHttp forbids GET bodies; ES search accepts the equivalent POST. Capture transport/auth
+        // before dispatch so changing profiles cannot send the old query to the new endpoint.
+        String wireMethod = "GET".equals(method) && !body.isEmpty() ? "POST" : method;
+        RequestBody requestBody = "HEAD".equals(wireMethod) || (body.isEmpty() && !"POST".equals(wireMethod) && !"PUT".equals(wireMethod))
+                ? null : RequestBody.create(body, MediaType.get(JSON_UTF8));
+        Request request = buildRequest(wireMethod, path, requestBody);
+        OkHttpClient client = getHttpClient();
+        long generation = connectionGeneration;
 
         // 加入历史
         addToHistory(method, path, body);
@@ -1464,19 +1616,16 @@ public class ElasticsearchPanel extends JPanel {
         long start = System.currentTimeMillis();
 
         new SwingWorker<ResponseWrapper, Void>() {
+            /** Sends the fixed request and transport snapshot selected on the EDT. */
             @Override
             protected ResponseWrapper doInBackground() throws Exception {
-                return switch (method) {
-                    case "POST" -> doPostWithCode(path, body);
-                    case "PUT" -> doPutWithCode(path, body);
-                    case HTTP_DELETE -> doDeleteWithCode(path, body);
-                    case "HEAD" -> doHeadWithCode(path);
-                    default -> doGetWithCode(path, body);
-                };
+                return executeHttpWithCode(request, client);
             }
 
+            /** A response from an older connection cannot overwrite the current connection's result. */
             @Override
             protected void done() {
+                if (generation != connectionGeneration || !connected) return;
                 long elapsed = System.currentTimeMillis() - start;
                 executeBtn.setEnabled(true);
                 try {
@@ -1777,12 +1926,6 @@ public class ElasticsearchPanel extends JPanel {
         return executeHttpWithCode(builder.build());
     }
 
-    private ResponseWrapper doHeadWithCode(String path) throws IOException {
-        Request.Builder builder = new Request.Builder().url(baseUrl + normalizePath(path)).head();
-        if (authHeader != null) builder.header(HEADER_AUTHORIZATION, authHeader);
-        return executeHttpWithCode(builder.build());
-    }
-
     // ===== 原始 String HTTP 方法（供内部非 executeRequest 调用）=====
     private String doGet(String path, String body) throws IOException {
         return doGetWithCode(path, body).body();
@@ -1808,8 +1951,19 @@ public class ElasticsearchPanel extends JPanel {
         return builder.build();
     }
 
+    /** Executes auxiliary operations using the currently connected transport. */
     private ResponseWrapper executeHttpWithCode(Request req) throws IOException {
-        try (Response resp = getHttpClient().newCall(req).execute()) {
+        return executeHttpWithCode(req, getHttpClient());
+    }
+
+    /**
+     * Executes a connection snapshot and always closes its response, retaining nonempty ES error bodies.
+     * @param req fixed endpoint, headers, method and body selected before background dispatch
+     * @param client transport settings belonging to that connection
+     * @return HTTP status and raw response body, including ES error details
+     */
+    private ResponseWrapper executeHttpWithCode(Request req, OkHttpClient client) throws IOException {
+        try (Response resp = client.newCall(req).execute()) {
             String body = resp.body() != null ? resp.body().string() : "";
             if (!resp.isSuccessful() && body.isEmpty()) {
                 throw new IOException("HTTP " + resp.code() + " " + resp.message());
