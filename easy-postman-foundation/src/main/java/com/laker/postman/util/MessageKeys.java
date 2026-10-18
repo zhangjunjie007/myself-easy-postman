@@ -76,6 +76,7 @@ public final class MessageKeys {
     public static final String UPDATE_FETCH_RELEASE_FAILED = "update.fetch_release_failed";
     public static final String UPDATE_NO_VERSION_INFO = "update.no_version_info";
     public static final String UPDATE_ALREADY_LATEST = "update.already_latest";
+    public static final String UPDATE_APP_UPDATE_DISABLED = "update.app.update_disabled";
     public static final String UPDATE_ALREADY_LATEST_WITH_PLUGINS = "update.already_latest_with_plugins";
     public static final String UPDATE_AVAILABLE_NO_ASSET = "update.available_no_asset";
     public static final String UPDATE_AVAILABLE_NO_ASSET_TITLE = "update.available_no_asset.title";

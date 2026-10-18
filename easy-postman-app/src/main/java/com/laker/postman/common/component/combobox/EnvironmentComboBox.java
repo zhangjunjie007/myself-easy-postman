@@ -19,13 +19,14 @@ public class EnvironmentComboBox extends JComboBox<EnvironmentItem> {
 
     /**
      * 创建顶部环境选择框，预留长名称的显示空间；窄窗口允许收缩，悬停显示完整名称。
+     * 菜单栏靠右排列，右边界固定；宽度 200→150 使控件左边界右移约当前宽度的四分之一。
      * 初始化和重载期间只更新展示，不触发环境切换回调。
      */
     public EnvironmentComboBox() {
         setRenderer(new EnvironmentItemRenderer());
         setMinimumSize(new Dimension(120, 28));
-        setPreferredSize(new Dimension(200, 28));
-        setMaximumSize(new Dimension(200, 28));
+        setPreferredSize(new Dimension(150, 28));
+        setMaximumSize(new Dimension(150, 28));
         setFont(FontsUtil.getDefaultFont(Font.PLAIN)); // 使用用户设置的字体大小
         setFocusable(false);
         // 设置无边框样式

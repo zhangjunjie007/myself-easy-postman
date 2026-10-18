@@ -3,6 +3,7 @@ package com.laker.postman.panel.topmenu.setting;
 import com.laker.postman.platform.update.UpdateCenter;
 import com.laker.postman.platform.update.model.UpdatePolicy;
 import com.laker.postman.platform.update.model.UpdateTarget;
+import com.laker.postman.service.UpdateService;
 import com.laker.postman.service.setting.SettingManager;
 import com.laker.postman.service.update.AppUpdateCenter;
 import com.laker.postman.util.I18nUtil;
@@ -55,6 +56,13 @@ public class AutoUpdateSettingsPanel extends ModernSettingsPanel {
 
         // 根据当前设置选择对应的选项
         selectFrequency(appUpdateFrequencyComboBox, appPolicy.frequency().getCode());
+        if (!UpdateService.APP_UPDATE_ENABLED) {
+            // 定制版屏蔽官方应用包更新，避免设置项造成“可开启”的误解。
+            appUpdateCheckBox.setSelected(false);
+            appUpdateCheckBox.setEnabled(false);
+            appUpdateFrequencyComboBox.setEnabled(false);
+            appUpdateCheckBox.setToolTipText(I18nUtil.getMessage(MessageKeys.UPDATE_APP_UPDATE_DISABLED));
+        }
 
         JPanel frequencyRow = createFieldRow(
                 I18nUtil.getMessage(MessageKeys.SETTINGS_AUTO_UPDATE_FREQUENCY),

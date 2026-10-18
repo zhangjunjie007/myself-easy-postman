@@ -21,6 +21,12 @@ import java.util.concurrent.CompletableFuture;
 @Component
 public class UpdateService {
 
+    /**
+     * 定制版禁止应用本体更新：官方安装包会覆盖当前定制客户端。
+     * 插件更新仍保留，只关闭主程序更新检查与安装入口。
+     */
+    public static final boolean APP_UPDATE_ENABLED = false;
+
     @Autowired
     private AppUpdateCheckCoordinator appUpdateCheckCoordinator;
 
@@ -31,8 +37,10 @@ public class UpdateService {
      * 启动时异步检查更新
      */
     public void checkUpdateOnStartup() {
-        // 启动后台更新检查
-        appUpdateCheckCoordinator.startBackgroundCheck();
+        // 定制版不做应用本体更新；避免官方新版本提示和覆盖。
+        if (APP_UPDATE_ENABLED) {
+            appUpdateCheckCoordinator.startBackgroundCheck();
+        }
         pluginUpdateCheckCoordinator.startBackgroundCheck();
     }
 
@@ -40,6 +48,17 @@ public class UpdateService {
      * 手动检查更新（用于菜单调用）
      */
     public void checkUpdateManually() {
+        if (!APP_UPDATE_ENABLED) {
+            // 只检查插件，明确告知应用本体更新被定制版锁定。
+            NotificationCenter.showInfo(I18nUtil.getMessage(MessageKeys.UPDATE_APP_UPDATE_DISABLED));
+            pluginUpdateCheckCoordinator.checkForUpdateManually()
+                    .thenAccept(pluginUpdateCheckCoordinator::handleManualCheckResult)
+                    .exceptionally(throwable -> {
+                        log.error("Manual plugin update check failed", throwable);
+                        return null;
+                    });
+            return;
+        }
         CompletableFuture<PluginUpdateCheckResult> pluginUpdateFuture = pluginUpdateCheckCoordinator.checkForUpdateManually();
         appUpdateCheckCoordinator.checkForUpdateManually()
                 .thenCombine(pluginUpdateFuture, (updateInfo, pluginUpdateResult) -> {

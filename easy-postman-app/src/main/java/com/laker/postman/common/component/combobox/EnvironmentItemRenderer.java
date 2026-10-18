@@ -18,6 +18,18 @@ public class EnvironmentItemRenderer extends DefaultListCellRenderer {
             Environment env = item.getEnvironment();
             label.setText(env.getName());
         }
+        // 顶部环境框宽度收窄后，名称和下拉列表统一居中、加粗并使用主文字颜色。
+        label.setHorizontalAlignment(SwingConstants.CENTER);
+        Font baseFont = label.getFont();
+        if (baseFont != null) {
+            label.setFont(baseFont.deriveFont(Font.BOLD));
+        }
+        if (!isSelected) {
+            Color foreground = list.getForeground();
+            if (foreground != null) {
+                label.setForeground(foreground);
+            }
+        }
         return label;
     }
 }
